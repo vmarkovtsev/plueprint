@@ -6,3 +6,5 @@ Currently, not finished. Development plans include:
 
 * Writing a good test suite
 * Adding the test generator for Django (as a separate project)
+
+Released under New BSD license.
