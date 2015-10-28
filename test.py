@@ -30,8 +30,14 @@ ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 """
 
+import os
+import sys
 
 from markdown import Markdown
+
+root = os.path.abspath(os.path.dirname(os.path.dirname(__file__)))
+if root not in sys.path:
+    sys.path.insert(0, root)
 
 
 def main():

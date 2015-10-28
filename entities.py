@@ -29,13 +29,17 @@ ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 """
-
+import sys
 
 from collections import OrderedDict
 import json
 from six import add_metaclass
+import six
 from types import GeneratorType
 from xml.etree import ElementTree
+
+
+report_warnings = True
 
 
 def select_pos(*args):
@@ -48,6 +52,13 @@ def select_pos(*args):
     if pos == 100500:
         pos = -1
     return pos
+
+
+def get_section_name(txt):
+    sep_pos = select_pos(txt.find(c) for c in (' ', '\t'))
+    if sep_pos < 0:
+        sep_pos = len(txt)
+    return txt[:sep_pos]
 
 
 class SelfParsingSectionRegistryDict(type):
@@ -103,7 +114,7 @@ def Collection(child_type):
     @add_metaclass(SelfParsingSectionRegistry)
     class Base(object):
         def __init__(self, children):
-            super(Collection, self).__init__()
+            super(Base, self).__init__()
             self._children = OrderedDict()
             for child in children:
                 assert isinstance(child, child_type)
@@ -120,21 +131,22 @@ def Collection(child_type):
         def __getitem__(self, item):
             return self._children[item]
 
+        @classmethod
+        def parse_from_etree(cls, node):
+            if len(node) == 0 or node[0].tag != "ul":
+                raise ValueError("Invalid format: %s" % cls.__name__)
+            return cls(child_type.parse_from_etree(c) for c in node[0])
+
     return Base
 
 
-class Attribute(object):
+class Attribute(NamedSection):
     def __init__(self, name, type_, required, description, value):
-        super(Attribute, self).__init__()
-        self._name = name
-        self._type = type_
+        super(Attribute, self).__init__(name, description)
+        self._type = type_ or "object"
         self._required = required
         self._description = description
         self._value = value
-
-    @property
-    def name(self):
-        return self._name
 
     @property
     def type(self):
@@ -145,17 +157,28 @@ class Attribute(object):
         return self._required
 
     @property
-    def description(self):
-        return self._description
-
-    @property
     def value(self):
         return self._value
 
+    @property
+    def is_array(self):
+        return self.type.startswith("array")
+
     @staticmethod
-    def parse_from_string(txt):
-        lines = txt.strip().split('\n')
-        line = lines[0]
+    def extract_array_subtype(type_):
+        if type_ is None or not type_.startswith("array"):
+            raise ValueError("Type %s is not an array type" % type_)
+        subtype = type_[len("array"):]
+        if subtype:
+            if subtype[0] != '[' or subtype[-1] != ']':
+                raise ValueError("Invalid type format: %s")
+            subtype = subtype[1:-1]
+        else:
+            subtype = "object"
+        return subtype
+
+    @staticmethod
+    def parse_from_string(line):
         if line[0] in ('-', '+'):
             line = line[1:]
         colon_pos = line.find(':')
@@ -166,6 +189,7 @@ class Attribute(object):
             sep_pos = select_pos(line.find(c) for c in (' ', '\t'))
             if sep_pos > -1:
                 name = line[:sep_pos].strip()
+                line = line[sep_pos + 1:].strip()
             else:
                 raise ValueError("Invalid format")
         desc_pos = line.rfind('-')
@@ -174,7 +198,7 @@ class Attribute(object):
             line = line[:desc_pos].strip()
         else:
             desc = None
-        if line[-1] == ')':
+        if line and line[-1] == ')':
             type_pos = line.rfind('(')
             if type_pos < 0:
                 raise ValueError("Invalid type format")
@@ -182,6 +206,7 @@ class Attribute(object):
             req_pos = type_.rfind(',')
             if req_pos > -1:
                 word = type_[req_pos + 1:].strip()
+                type_ = type_[:req_pos].strip()
                 required = word == "required"
                 if not required and word == "optional":
                     required = False
@@ -191,34 +216,61 @@ class Attribute(object):
         else:
             type_ = None
             required = None
-        if len(lines) == 1:
-            value = line if line else None
-        else:
-            value_object = OrderedDict()
-            value_list = []
-            for line in lines[1:]:
-                attr = Attribute.parse_from_string(line)
-                if attr.name is None:
-                    value_list.append(attr)
-                else:
-                    value_object[attr.name] = attr
-            if len(value_list) > 0 and len(value_object) > 0:
-                raise ValueError("Invalid format")
-            value = value_list if value_list else value_object
+        value = line if line else None
+        if value is not None:
+            try:
+                subtype = Attribute.extract_array_subtype(type_)
+            except ValueError:
+                pass
+            else:
+                value = [Attribute(None, subtype, None, None, v.split())
+                         for v in value.split(',')]
         return Attribute(name, type_, required, desc, value)
 
     def __str__(self):
         res = self.name
         if self.value is not None:
-            res += ": " + self.value
+            multivalue = not isinstance(self.value, six.string_types)
+            if not multivalue:
+                res += ": " + self.value
+        else:
+            multivalue = False
         if self.type is not None:
             res += " (" + self.type
             if isinstance(self.required, bool):
                 res += ", " + ("optional", "required")[self.required]
             res += ")"
         if self.description is not None:
-            res += " - " + self.description
+            res += " - " + self.description.replace('\n', ' ')
+        if multivalue:
+            res += "\n"
+            for v in self.value:
+                for line in str(v).split('\n'):
+                    res += "  %s\n" % line
         return res
+
+    @staticmethod
+    def parse_from_etree(node):
+        attr = Attribute.parse_from_string(node.text)
+        index = 0
+        while len(node) > index and node[index].tag == "p":
+            if attr._description is None:
+                attr._description = node[index].text
+            else:
+                attr._description += "\n" + node[index].text
+            index += 1
+        if len(node) > index and node[index].tag == "ul":
+            if attr.value is not None:
+                raise ValueError("Multiple value for the same attribute %s" %
+                                 attr.name)
+            children = [Attribute.parse_from_etree(c) for c in node[index]]
+            attr._value = children
+            if attr.is_array:
+                subtype = attr.extract_array_subtype(attr.type)
+                for c in children:
+                    if c.type == "object":
+                        c._type = subtype
+        return attr
 
 
 class ParameterMember(object):
@@ -248,7 +300,9 @@ class Parameter(Attribute):
         self._default_value = default_value
         if members is not None:
             assert isinstance(members, (tuple, list))
-        self._members = tuple(members)
+            self._members = tuple(members)
+        else:
+            self._members = tuple()
 
     @property
     def default_value(self):
@@ -258,27 +312,54 @@ class Parameter(Attribute):
     def members(self):
         return self._members
 
+    @staticmethod
+    def parse_from_etree(node):
+        attr = Attribute.parse_from_string(node.text)
+        desc = attr.description
+        index = 0
+        while len(node) > index and node[index].tag == "p":
+            desc += "\n" + node[index].text
+            index += 1
+        defval = None
+        members = None
+        if len(node) > index and node[index].tag == "ul":
+            for li in node[index]:
+                if li.text.startswith("Default"):
+                    if attr.required or attr.required is None:
+                        raise ValueError(
+                            "Default value was specified for a non-optional "
+                            "parameter %s" % attr.name)
+                    sep_pos = li.text.find(':')
+                    if sep_pos < 0:
+                        raise ValueError("Invalid format")
+                    defval = li.text[sep_pos + 1:].strip()
+                elif li.text.startswith("Members"):
+                    if len(li) == 0 or li[0].tag != "ul":
+                        raise ValueError("Invalid format: %s" % attr.name)
+                    members = [ParameterMember.parse_from_string(m.text)
+                               for m in li[0]]
+        return Parameter(attr.name, attr.type, attr.required, desc, attr.value,
+                         defval, members)
+
 
 class Parameters(Collection(Parameter)):
     NESTED_SECTION_ID = "parameters"
-
-    @staticmethod
-    def parse_from_etree(node):
-        return None
+    SECTION_TYPE = "Parameters"
 
 
 class Attributes(Collection(Attribute)):
     NESTED_SECTION_ID = "attributes"
-
-    @staticmethod
-    def parse_from_etree(node):
-        return None
+    SECTION_TYPE = "Attributes"
 
 
+@six.add_metaclass(SelfParsingSectionRegistry)
 class Headers(object):
+    NESTED_SECTION_ID = "headers"
+    SECTION_TYPE = "Headers"
+
     def __init__(self, headers):
         super(Headers, self).__init__()
-        self._headers = OrderedDict(headers)
+        self._headers = OrderedDict(headers) if headers else OrderedDict()
 
     def __iter__(self):
         for p in self._headers.items():
@@ -298,6 +379,17 @@ class Headers(object):
 
     def __str__(self):
         return "\n".join("%s: %s" % p for p in self)
+
+    @staticmethod
+    def parse_from_etree(node):
+        if len(node) == 0 or node[0].tag not in ("p", "pre"):
+            raise ValueError("Invalid headers section format")
+        if node[0].text:
+            headers = dict(tuple(map(str.strip, line.split(':')))
+                           for line in node[0].text.split('\n'))
+        else:
+            headers = None
+        return Headers(headers)
 
 
 class AssetSection(object):
@@ -324,16 +416,22 @@ class PredefinedAssetSection(AssetSection):
         super(PredefinedAssetSection, self).__init__(
             self.SECTION_TYPE, content)
 
-    @staticmethod
-    def parse_from_etree(node):
-        return None
+    @classmethod
+    def parse_from_etree(cls, node):
+        if len(node) == 0:
+            raise ValueError("Assets section is empty")
+        if node[0].tag not in ("pre", "p"):
+            raise ValueError("Invalid format of asset section")
+        return cls(node[0].text)
 
 
 class Body(PredefinedAssetSection):
+    NESTED_SECTION_ID = "body"
     SECTION_TYPE = "Body"
 
 
 class Schema(PredefinedAssetSection):
+    NESTED_SECTION_ID = "schema"
     SECTION_TYPE = "Schema"
 
 
@@ -422,9 +520,64 @@ class PredefinedPayloadSection(PayloadSection):
             self.SECTION_TYPE, name, media_type, description, headers,
             attributes, body, schema)
 
+    @classmethod
+    def parse_from_etree(cls, node):
+        name, media_type = cls.parse_definition(node.text)
+        index = 0
+        desc = ""
+        while len(node) > index and node[index].tag == "p":
+            desc += node[index].text + "\n"
+            index += 1
+        desc = desc[:-1] if desc else None
+        kwargs = {
+            "headers": None,
+            "attributes": None,
+            "body": None,
+            "schema": None
+        }
+        if len(node) > index:
+            if node[index].tag == "pre":
+                kwargs["body"] = Body(node[index].text)
+            elif node[index].tag == "ul":
+                for li in node[index]:
+                    section_name = get_section_name(li.text)
+                    try:
+                        section = SelfParsingSectionRegistry[
+                            section_name].parse_from_etree(li)
+                    except KeyError:
+                        if report_warnings:
+                            sys.stderr.write(
+                                "Section \"%s\" is unknown\n" % section_name)
+                    except ValueError as e:
+                        if report_warnings:
+                            sys.stderr.write(
+                                "Failed to parse section \"%s\" in payload "
+                                "section %s: %s\n" % (section_name, name, e))
+                    else:
+                        kwargs[section.NESTED_SECTION_ID] = section
+        return cls(name, media_type, desc, **kwargs)
+
     @staticmethod
-    def parse_from_etree(node):
-        return None
+    def parse_definition(txt):
+        sep_pos = select_pos(txt.find(c) for c in (' ', '\t'))
+        if sep_pos < 0:
+            raise ValueError("Invalid payload section format")
+        txt = txt[sep_pos + 1:].strip()
+        if not txt:
+            return None, None
+        if txt[-1] == ')':
+            br_pos = txt.rfind('(')
+            if br_pos < 0:
+                raise ValueError("Invalid payload section format")
+            media_type = txt[br_pos + 1:-1].strip().split("/")
+            if br_pos > 0:
+                name = txt[:br_pos - 1]
+            else:
+                name = None
+        else:
+            name = txt
+            media_type = None
+        return name, media_type
 
 
 class ResourceModel(PredefinedPayloadSection):
@@ -496,29 +649,42 @@ class Relation(object):
 
     @staticmethod
     def parse_from_etree(node):
-        return None
+        return Relation(node.text.split(":")[-1].strip())
 
 
 class Request(PredefinedPayloadSection):
     SECTION_TYPE = "Request"
+    NESTED_SECTION_ID = "requests"
 
 
 class Response(PredefinedPayloadSection):
     SECTION_TYPE = "Response"
+    NESTED_SECTION_ID = "responses"
 
 
 class Action(ApiSection):
     NESTED_SECTIONS = ApiSection.NESTED_SECTIONS + ("relation",)
 
     def __init__(self, name, request_method, uri_template, description,
-                 relation, parameters, attributes):
+                 relation, parameters, attributes, requests, responses):
         super(Action, self).__init__(name, description, request_method,
                                      uri_template, parameters, attributes)
         if relation is not None:
             assert isinstance(relation, Relation)
         self._relation = relation
-        self._requests = OrderedDict()
-        self._responses = OrderedDict()
+        index = [0]
+
+        def iter_r(rs):
+            for r in rs:
+                if not r.name:
+                    yield str(index[0]), r
+                    index[0] += 1
+                else:
+                    yield r.name, r
+
+        self._requests = OrderedDict(iter_r(requests))
+        index = [0]
+        self._responses = OrderedDict(iter_r(responses))
 
     @property
     def relation(self):
@@ -550,8 +716,68 @@ class Action(ApiSection):
         return res
 
     @staticmethod
-    def parse_from_etree(node_def, node_list):
-        return None
+    def parse_definition(txt):
+        txt = txt.strip()
+        if txt[-1] == ']':
+            br_pos = txt.rfind('[')
+            if br_pos < 0:
+                raise ValueError("Invalid format")
+            part = txt[br_pos + 1:-1].strip()
+            sep_pos = select_pos(part.find(c) for c in (' ', '\t'))
+            if sep_pos > -1:
+                method = part[:sep_pos]
+                template = part[sep_pos:].strip()
+            else:
+                method = part
+                template = None
+            name = txt[:br_pos]
+        else:
+            name = None
+            method = txt
+            template = None
+        return name, method, template
+
+    @staticmethod
+    def parse_from_etree(sequence, index):
+        adef = Action.parse_definition(sequence[index].text)
+        desc = None
+        index += 1
+        while len(sequence) > index and sequence[index].tag == "p":
+            if desc is None:
+                desc = sequence[index].text
+            else:
+                desc += "\n" + sequence[index].text
+            index += 1
+        kwargs = {
+            "description": desc,
+            "relation": None,
+            "parameters": None,
+            "attributes": None,
+            "requests": [],
+            "responses": []
+        }
+        if len(sequence) > index and sequence[index].tag == "ul":
+            for li in sequence[index]:
+                section_name = get_section_name(li.text)
+                try:
+                    section = SelfParsingSectionRegistry[
+                        section_name].parse_from_etree(li)
+                except KeyError:
+                    if report_warnings:
+                        sys.stderr.write(
+                            "Section \"%s\" is unknown\n" % section_name)
+                except ValueError as e:
+                    if report_warnings:
+                        sys.stderr.write(
+                            "Failed to parse section \"%s\" in action "
+                            "%s: %s\n" % (section_name, adef[0], e))
+                else:
+                    if section.SECTION_TYPE in ("Request", "Response"):
+                        kwargs[section.NESTED_SECTION_ID].append(section)
+                    else:
+                        kwargs[section.NESTED_SECTION_ID] = section
+            index += 1
+        return Action(*adef, **kwargs), index
 
 
 class Resource(ApiSection):

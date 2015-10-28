@@ -29,13 +29,17 @@ ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 """
+import sys
 
 from collections import OrderedDict
+from markdown.preprocessors import Preprocessor
+from markdown.treeprocessors import Treeprocessor
 from weakref import WeakValueDictionary
 from markdown.extensions import Extension
 from markdown.serializers import ElementTree
-from entities import ResourceGroup, Resource, select_pos, \
-    SelfParsingSectionRegistry, Action
+from .entities import ResourceGroup, Resource, select_pos, \
+    SelfParsingSectionRegistry, Action, Attribute, get_section_name
+from . import entities
 
 
 class APIBlueprintParseError(Exception):
@@ -51,6 +55,7 @@ class APIBlueprint(object):
         self._groups = OrderedDict()
         self._attributes = WeakValueDictionary()
         self._models = WeakValueDictionary()
+        self._data_structures = OrderedDict()
 
         def strip():
             del self.strip
@@ -126,20 +131,25 @@ class APIBlueprint(object):
         sequence = [current]
         tag = current.tag
         is_group = self._is_group(current)
+        is_data_structures = self._is_data_structures(current)
         for item in root[index + 1:]:
             if self._is_header(item) and item.tag <= tag:
                 if is_group:
                     self._parse_resource_group(sequence)
                 else:
-                    try:
-                        group = self._groups[None]
-                    except KeyError:
-                        group = self._groups[None] = ResourceGroup(None, None)
-                    self._parse_resource(sequence, group)
+                    self._parse_resource(sequence, None)
                 del sequence[:]
                 tag = item.tag
                 is_group = self._is_group(item)
+                if not is_group:
+                    is_data_structures = self._is_data_structures(item)
             sequence.append(item)
+        if is_group:
+            self._parse_resource_group(sequence)
+        elif is_data_structures:
+            self._parse_data_structures(sequence)
+        else:
+            self._parse_resource(sequence, None)
 
     def _parse_resource_group(self, sequence):
         name = sequence[0].text
@@ -160,13 +170,23 @@ class APIBlueprint(object):
             children.append(item)
 
     def _parse_resource(self, sequence, group):
+        if group is None:
+            try:
+                group = self._groups[None]
+            except KeyError:
+                group = self._groups[None] = ResourceGroup(None, None)
         rdef = Resource.parse_definition(sequence[0].text)
         desc, index = self._parse_description(sequence[1:])
+        index += 1
         rdef += (desc,)
-        if len(sequence) <= index + 1:
+        if len(sequence) <= index:
             return
         if sequence[index].tag in ("ul", "ol"):
-            sections = [self._parse_section(s) for s in sequence[index]]
+            sections = []
+            for s in sequence[index]:
+                section = self._parse_section(s, rdef[0])
+                if section is not None:
+                    sections.append(section)
             index += 1
         else:
             sections = tuple()
@@ -177,19 +197,37 @@ class APIBlueprint(object):
         if len(sequence) <= index:
             return
         while index < len(sequence) and self._is_header(sequence[index]):
-            action = Action.parse_from_etree(*sequence[index:index + 2])
-            #r.actions[action.id] = action
-            index += 2
+            action, index = Action.parse_from_etree(sequence, index)
+            r.actions[action.id] = action
+
+    def _parse_data_structures(self, sequence):
+        index = 1
+        while index < len(sequence):
+            node = sequence[index]
+            index += 1
+            if index >= len(sequence) or sequence[index].tag != "ul":
+                raise ValueError("Invalid format of data structures")
+            node.append(sequence[index])
+            index += 1
+            attr = Attribute.parse_from_etree(node)
+            self._data_structures[attr.name] = attr
 
     @staticmethod
-    def _parse_section(item):
-        assert item[0].tag == "p"
-        title = item[0].text
-        sep_pos = select_pos(title.find(c) for c in (' ', '\t'))
-        if sep_pos < 0:
-            sep_pos = len(title)
-        section_type = title[:sep_pos]
-        return SelfParsingSectionRegistry[section_type].prase_from_etree(item)
+    def _parse_section(item, name):
+        section_name = get_section_name(item.text)
+        try:
+            return SelfParsingSectionRegistry[section_name].parse_from_etree(
+                item)
+        except KeyError:
+            if entities.report_warnings:
+                sys.stderr.write(
+                    "Section \"%s\" is unknown\n" % section_name)
+        except ValueError as e:
+            if entities.report_warnings:
+                sys.stderr.write(
+                    "Failed to parse section \"%s\" in resource "
+                    "%s: %s\n" % (section_name, name, e))
+        return None
 
     @staticmethod
     def _parse_description(sequence):
@@ -211,6 +249,43 @@ class APIBlueprint(object):
             return False
         return item.text.startswith("Group")
 
+    @classmethod
+    def _is_data_structures(cls, item):
+        if not cls._is_header(item):
+            return False
+        return item.text == "Data Structures"
+
+
+class BackQuotesRemover(Preprocessor):
+    def run(self, lines):
+        return [line.replace('`', '') for line in lines]
+
+
+class IndentationAligner(Preprocessor):
+    def run(self, lines):
+        new_lines = []
+        for line in lines:
+            if line:
+                i = 0
+                while line[i] == ' ':
+                    i += 1
+                if i > 0 and i % 4:
+                    line = ' ' * (i + (4 - (i % 4))) + line[i:]
+            new_lines.append(line)
+        return new_lines
+
+
+class TitleLifter(Treeprocessor):
+    def run(self, root):
+        lifo = [root]
+        while lifo:
+            last = lifo.pop()
+            if len(lifo) > 0 and last.text == "\n" and len(last) > 0 and \
+                    last[0].tag == "p":
+                last.text = last[0].text
+                last.remove(last[0])
+            lifo.extend(last)
+
 
 class PlueprintExtension(Extension):
     @staticmethod
@@ -219,5 +294,8 @@ class PlueprintExtension(Extension):
 
     def extendMarkdown(self, md, md_globals):
         md.output_formats["apiblueprint"] = self.to_apiblueprint
+        md.preprocessors["remove_backquotes"] = BackQuotesRemover(md)
+        md.preprocessors["align_indent"] = IndentationAligner(md)
+        md.treeprocessors["lift_title"] = TitleLifter(md)
         md.postprocessors.clear()
         md.stripTopLevelTags = False
