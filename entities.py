@@ -29,12 +29,13 @@ ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 """
-import sys
+
 
 from collections import OrderedDict
 import json
-from six import add_metaclass
-import six
+import re
+from six import add_metaclass, string_types
+import sys
 from types import GeneratorType
 from xml.etree import ElementTree
 
@@ -59,6 +60,24 @@ def get_section_name(txt):
     if sep_pos < 0:
         sep_pos = len(txt)
     return txt[:sep_pos]
+
+
+def parse_description(sequence, index):
+    desc = ""
+    while len(sequence) > index and sequence[index].tag == "p":
+        desc += sequence[index].text + "\n"
+        index += 1
+    return desc.strip() if desc else None, index
+
+
+def from_none(exc):
+    """Emulates raise ... from None (PEP 409) on older Python-s
+    """
+    try:
+        exc.__cause__ = None
+    except AttributeError:
+        exc.__context__ = None
+    return exc
 
 
 class SelfParsingSectionRegistryDict(type):
@@ -91,23 +110,6 @@ class NamedSection(object):
     @property
     def description(self):
         return self._description
-
-
-class ResourceGroup(NamedSection):
-    def __init__(self, name, description):
-        super(ResourceGroup, self).__init__(name, description)
-        self._resources = OrderedDict()
-
-    @property
-    def resources(self):
-        return self._resources
-
-    def __iter__(self):
-        for resource in self._resources.values():
-            yield resource
-
-    def __len__(self):
-        return len(self._resources)
 
 
 def Collection(child_type):
@@ -230,7 +232,7 @@ class Attribute(NamedSection):
     def __str__(self):
         res = self.name
         if self.value is not None:
-            multivalue = not isinstance(self.value, six.string_types)
+            multivalue = not isinstance(self.value, string_types)
             if not multivalue:
                 res += ": " + self.value
         else:
@@ -252,13 +254,11 @@ class Attribute(NamedSection):
     @staticmethod
     def parse_from_etree(node):
         attr = Attribute.parse_from_string(node.text)
-        index = 0
-        while len(node) > index and node[index].tag == "p":
-            if attr._description is None:
-                attr._description = node[index].text
-            else:
-                attr._description += "\n" + node[index].text
-            index += 1
+        desc, index = parse_description(node, 0)
+        if attr._description is None:
+            attr._description = desc
+        elif desc is not None:
+            attr._description += "\n" + desc
         if len(node) > index and node[index].tag == "ul":
             if attr.value is not None:
                 raise ValueError("Multiple value for the same attribute %s" %
@@ -315,11 +315,11 @@ class Parameter(Attribute):
     @staticmethod
     def parse_from_etree(node):
         attr = Attribute.parse_from_string(node.text)
-        desc = attr.description
-        index = 0
-        while len(node) > index and node[index].tag == "p":
-            desc += "\n" + node[index].text
-            index += 1
+        desc, index = parse_description(node, 0)
+        if attr.description is None:
+            attr._description = desc
+        elif desc is not None:
+            attr._description += "\n" + desc
         defval = None
         members = None
         if len(node) > index and node[index].tag == "ul":
@@ -351,8 +351,31 @@ class Attributes(Collection(Attribute)):
     NESTED_SECTION_ID = "attributes"
     SECTION_TYPE = "Attributes"
 
+    def __init__(self, children, reference=None):
+        if reference is not None:
+            assert children is None
+            children = tuple()
+        super(Attributes, self).__init__(children)
+        self._reference = reference
 
-@six.add_metaclass(SelfParsingSectionRegistry)
+    @property
+    def reference(self):
+        return self._reference
+
+    @classmethod
+    def parse_from_etree(cls, node):
+        try:
+            return super(Attributes, cls).parse_from_etree(node)
+        except ValueError as e:
+            if node.text[-1] == ')':
+                br_pos = node.text.rfind('(')
+                if br_pos > -1:
+                    reference = node.text[br_pos + 1:-1]
+                    return Attributes(None, reference)
+            raise from_none(e)
+
+
+@add_metaclass(SelfParsingSectionRegistry)
 class Headers(object):
     NESTED_SECTION_ID = "headers"
     SECTION_TYPE = "Headers"
@@ -523,12 +546,7 @@ class PredefinedPayloadSection(PayloadSection):
     @classmethod
     def parse_from_etree(cls, node):
         name, media_type = cls.parse_definition(node.text)
-        index = 0
-        desc = ""
-        while len(node) > index and node[index].tag == "p":
-            desc += node[index].text + "\n"
-            index += 1
-        desc = desc[:-1] if desc else None
+        desc, index = parse_description(node, 0)
         kwargs = {
             "headers": None,
             "attributes": None,
@@ -587,6 +605,7 @@ class ResourceModel(PredefinedPayloadSection):
 
 class ApiSection(NamedSection):
     NESTED_SECTIONS = "parameters", "attributes"
+    URL_PATH_PATH_REGEXP = re.compile("^[\w\-\.]*$]")
 
     def __init__(self, name, description, request_method, uri_template,
                  parameters, attributes):
@@ -605,6 +624,18 @@ class ApiSection(NamedSection):
     @property
     def uri_template(self):
         return self._uri_template
+
+    @property
+    def const_uri(self):
+        if self.uri_template is None:
+            return None
+        parts = self.uri_template.split('/')
+        const_parts = []
+        for p in parts:
+            if not self.URL_PATH_PATH_REGEXP.match(p):
+                break
+            const_parts.append(p)
+        return "/" + "/".join(const_parts)
 
     @property
     def parameters(self):
@@ -730,7 +761,7 @@ class Action(ApiSection):
             else:
                 method = part
                 template = None
-            name = txt[:br_pos]
+            name = txt[:br_pos].strip()
         else:
             name = None
             method = txt
@@ -740,14 +771,7 @@ class Action(ApiSection):
     @staticmethod
     def parse_from_etree(sequence, index):
         adef = Action.parse_definition(sequence[index].text)
-        desc = None
-        index += 1
-        while len(sequence) > index and sequence[index].tag == "p":
-            if desc is None:
-                desc = sequence[index].text
-            else:
-                desc += "\n" + sequence[index].text
-            index += 1
+        desc, index = parse_description(sequence, index + 1)
         kwargs = {
             "description": desc,
             "relation": None,
@@ -777,6 +801,13 @@ class Action(ApiSection):
                     else:
                         kwargs[section.NESTED_SECTION_ID] = section
             index += 1
+        # This section may include one nested Attributes section defining the
+        # input (request) attributes of the section. If present, these
+        # attributes should be inherited in every Action's Request section
+        # unless specified otherwise.
+        for req in kwargs["requests"]:
+            if req.attributes is None:
+                req._attributes = kwargs["attributes"]
         return Action(*adef, **kwargs), index
 
 
@@ -792,22 +823,18 @@ class Resource(ApiSection):
         self._actions = OrderedDict()
 
     @property
-    def actions(self):
-        return self._actions
-
-    @property
     def model(self):
         return self._model
 
     def __iter__(self):
-        for action in self.actions:
+        for action in self._actions.values():
             yield action
 
     def __len__(self):
-        return len(self.actions)
+        return len(self._actions)
 
     def __getitem__(self, item):
-        return self.actions[item]
+        return self._actions[item]
 
     def __str__(self):
         res = "Resource "
@@ -841,7 +868,7 @@ class Resource(ApiSection):
             else:
                 method = None
                 template = part
-            name = txt[:br_pos]
+            name = txt[:br_pos].strip()
         else:
             name = None
             sep_pos = select_pos(txt.find(c) for c in (' ', '\t'))
@@ -857,3 +884,28 @@ class Resource(ApiSection):
                 method = None
                 template = txt
         return name, method, template
+
+
+class ResourceGroup(NamedSection):
+    def __init__(self, name, description):
+        super(ResourceGroup, self).__init__(name, description)
+        self._resources = OrderedDict()
+
+    def __getitem__(self, item):
+        return self._resources[item]
+
+    def __iter__(self):
+        for resource in self._resources.values():
+            yield resource
+
+    def __len__(self):
+        return len(self._resources)
+
+    def __str__(self):
+        return "Resource group with %d resources (%d actions)" % (
+            len(self), sum(len(r) for r in self)
+        )
+
+    def print_resources(self):
+        for r in self:
+            print(r)

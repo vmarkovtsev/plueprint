@@ -47,6 +47,12 @@ def main():
         txt = fin.read()
     api = m.convert(txt)
     print(api)
+    api[">"].print_resources()
+    for action in api["/api/"]:
+        print("  %s" % action)
+    for action in api["/api/:GET"]:
+        print("  %s" % action)
+    print(api[">>Настройка прав"])
 
 if __name__ == "__main__":
     main()

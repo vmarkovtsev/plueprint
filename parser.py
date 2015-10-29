@@ -29,16 +29,19 @@ ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 """
+from itertools import chain
 import sys
 
-from collections import OrderedDict
+from collections import OrderedDict, defaultdict
 from markdown.preprocessors import Preprocessor
 from markdown.treeprocessors import Treeprocessor
 from weakref import WeakValueDictionary
 from markdown.extensions import Extension
 from markdown.serializers import ElementTree
+from pytrie import SortedStringTrie as trie
 from .entities import ResourceGroup, Resource, select_pos, \
-    SelfParsingSectionRegistry, Action, Attribute, get_section_name
+    SelfParsingSectionRegistry, Action, Attribute, get_section_name, \
+    parse_description
 from . import entities
 
 
@@ -53,6 +56,7 @@ class APIBlueprint(object):
         self._name = None
         self._overview = None
         self._groups = OrderedDict()
+        self._trie = trie()
         self._attributes = WeakValueDictionary()
         self._models = WeakValueDictionary()
         self._data_structures = OrderedDict()
@@ -81,27 +85,65 @@ class APIBlueprint(object):
         return self._overview
 
     @property
-    def groups(self):
-        return self._groups
+    def resources(self):
+        for g in self:
+            for r in g:
+                yield r
+
+    @property
+    def actions(self):
+        for r in self.resources:
+            for a in r:
+                yield a
 
     def __iter__(self):
         for group in self._groups.values():
-            for resource in group:
-                yield resource
+            yield group
 
     def __len__(self):
-        return sum(len(g) for g in self._groups.values())
+        return len(self._groups)
 
     def __getitem__(self, item):
+        if item:
+            if item[0] == ">":
+                path = item[1:].split(">")
+                if path[0]:
+                    group = self._groups[path[0]]
+                else:
+                    group = self._groups[None]
+                if len(path) == 1:
+                    return group
+                resource = group[path[1]]
+                if len(path) == 2:
+                    return resource
+                action = resource[path[2]]
+                return action
+            elif item[0] == "/":
+                cpos = item.find(":")
+                if ":" in item:
+                    method = item[cpos + 1:]
+                    item = item[:cpos]
+                else:
+                    method = None
+                if item[-1] == "/":
+                    item = item[:-1]
+                values = self._trie.longest_prefix_value(item)
+                if method is None:
+                    return tuple(chain.from_iterable(values.values()))
+                return values[method]
         return self._groups[item]
 
     def __str__(self):
-        return "APIBlueprint \"%s\", format %s, with %d resources (%d " \
-               "actions)" % (
-            self.name, self.format, len(self), self.count_actions())
+        return "APIBlueprint \"%s\", format %s, with %d resource groups (%d " \
+               "resources, %d actions)" % (
+                self.name, self.format, len(self), self.count_resources(),
+                self.count_actions())
+
+    def count_resources(self):
+        return sum(len(g) for g in self)
 
     def count_actions(self):
-        return sum(len(r) for r in self)
+        return sum(sum(len(r) for r in g) for g in self)
 
     @staticmethod
     def parse_from_etree(tree):
@@ -150,14 +192,22 @@ class APIBlueprint(object):
             self._parse_data_structures(sequence)
         else:
             self._parse_resource(sequence, None)
+        paths = defaultdict(lambda: defaultdict(list))
+        for a in self.actions:
+            cu = a.const_uri
+            if cu is not None:
+                paths[cu][a.request_method].append(a)
+        self._trie = trie(paths.items())
+        self._apply_attributes_references()
+        self._apply_model_reference()
 
     def _parse_resource_group(self, sequence):
         name = sequence[0].text
         name_pos = name.find("Group") + len("Group")
         name = name[name_pos:].strip()
-        desc, index = self._parse_description(sequence[1:])
+        desc, index = parse_description(sequence, 1)
         self._groups[name] = group = ResourceGroup(name, desc)
-        if len(sequence) <= index + 1:
+        if len(sequence) <= index:
             return
         current = sequence[index]
         children = [current]
@@ -176,8 +226,7 @@ class APIBlueprint(object):
             except KeyError:
                 group = self._groups[None] = ResourceGroup(None, None)
         rdef = Resource.parse_definition(sequence[0].text)
-        desc, index = self._parse_description(sequence[1:])
-        index += 1
+        desc, index = parse_description(sequence, 1)
         rdef += (desc,)
         if len(sequence) <= index:
             return
@@ -193,12 +242,18 @@ class APIBlueprint(object):
         kwargs = {s: None for s in Resource.NESTED_SECTIONS}
         kwargs.update({s.NESTED_SECTION_ID: s for s in sections})
         r = Resource(*rdef, **kwargs)
-        group.resources[r.id] = r
+        group._resources[r.id] = r
+        if r.attributes is not None and r.name is not None:
+            self._attributes[r.name] = r.attributes
         if len(sequence) <= index:
             return
         while index < len(sequence) and self._is_header(sequence[index]):
             action, index = Action.parse_from_etree(sequence, index)
-            r.actions[action.id] = action
+            if action.uri_template is None:
+                action._uri_template = r.uri_template
+            if action.request_method is None:
+                action._request_method = r.request_method
+            r._actions[action.id] = action
 
     def _parse_data_structures(self, sequence):
         index = 1
@@ -211,6 +266,12 @@ class APIBlueprint(object):
             index += 1
             attr = Attribute.parse_from_etree(node)
             self._data_structures[attr.name] = attr
+
+    def _apply_attributes_references(self):
+        pass
+
+    def _apply_model_reference(self):
+        pass
 
     @staticmethod
     def _parse_section(item, name):
@@ -228,15 +289,6 @@ class APIBlueprint(object):
                     "Failed to parse section \"%s\" in resource "
                     "%s: %s\n" % (section_name, name, e))
         return None
-
-    @staticmethod
-    def _parse_description(sequence):
-        index = 0
-        desc = ""
-        while len(sequence) > index and sequence[index].tag == "p":
-            desc += sequence[index].text
-            index += 1
-        return desc if desc else None, index
 
     @staticmethod
     def _is_header(item):
