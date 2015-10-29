@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """
 API Blueprint (https://github.com/apiaryio/api-blueprint) parser which uses
 Markdown (https://pythonhosted.org/Markdown/).
@@ -30,6 +31,7 @@ ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 """
 
+import codecs
 import os
 import sys
 
@@ -43,7 +45,7 @@ if root not in sys.path:
 def main():
     m = Markdown(extensions=["plueprint"])
     m.set_output_format("apiblueprint")
-    with open("../blueprint.md", "r") as fin:
+    with codecs.open("blueprint.md", "r", "utf-8") as fin:
         txt = fin.read()
     api = m.convert(txt)
     print(api)

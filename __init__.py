@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """
 API Blueprint (https://github.com/apiaryio/api-blueprint) parser which uses
 Markdown (https://pythonhosted.org/Markdown/).

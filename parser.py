@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """
 API Blueprint (https://github.com/apiaryio/api-blueprint) parser which uses
 Markdown (https://pythonhosted.org/Markdown/).
@@ -58,7 +59,6 @@ class APIBlueprint(object):
         self._groups = OrderedDict()
         self._trie = trie()
         self._attributes = WeakValueDictionary()
-        self._models = WeakValueDictionary()
         self._data_structures = OrderedDict()
 
         def strip():
@@ -199,7 +199,6 @@ class APIBlueprint(object):
                 paths[cu][a.request_method].append(a)
         self._trie = trie(paths.items())
         self._apply_attributes_references()
-        self._apply_model_reference()
 
     def _parse_resource_group(self, sequence):
         name = sequence[0].text
@@ -229,6 +228,8 @@ class APIBlueprint(object):
         desc, index = parse_description(sequence, 1)
         rdef += (desc,)
         if len(sequence) <= index:
+            if entities.report_warnings:
+                sys.stderr.write("Skipped empty resource %s\n" % rdef[0])
             return
         if sequence[index].tag in ("ul", "ol"):
             sections = []
@@ -253,6 +254,16 @@ class APIBlueprint(object):
                 action._uri_template = r.uri_template
             if action.request_method is None:
                 action._request_method = r.request_method
+            for rr in chain(action.requests.values(),
+                           action.responses.values()):
+                if rr._reference is None:
+                    continue
+                if rr._reference != r.name:
+                    if entities.report_warnings:
+                        sys.stderr.write("Bad reference: %s\n" %
+                                         rr._reference)
+                else:
+                    rr._copy_from_payload(r.model)
             r._actions[action.id] = action
 
     def _parse_data_structures(self, sequence):
@@ -268,19 +279,33 @@ class APIBlueprint(object):
             self._data_structures[attr.name] = attr
 
     def _apply_attributes_references(self):
+        for key, attr in self._data_structures.items():
+            ref = attr._reference
+            if ref is not None:
+                self._data_structures[key] = attr = self._attributes.get(ref)
+                if attr is None and entities.report_warnings:
+                    sys.stderr.write("Invalid attributes reference in Data "
+                                     "Structures: %s\n" % ref)
         for r in self.resources:
             oldattr = r.attributes
             if oldattr is not None and oldattr.reference is not None:
-                r._attributes = self._attributes[oldattr.reference]
+                r._attributes = self._attributes.get(
+                    oldattr.reference,
+                    self._data_structures.get(oldattr.reference))
+                if r.attributes is None and entities.report_warnings:
+                    sys.stderr.write("Invalid attributes reference: %s\n" %
+                                     oldattr.reference)
             for a in r:
                 if a.attributes is oldattr:
                     a._attributes = r.attributes
                 elif a.attributes is not None and \
                         a.attributes.reference is not None:
-                    a._attributes = self._attributes[a.attributes.reference]
-
-    def _apply_model_reference(self):
-        pass
+                    ref = a.attributes.reference
+                    a._attributes = self._attributes.get(
+                        ref, self._data_structures.get(ref))
+                    if a.attributes is None and entities.report_warnings:
+                        sys.stderr.write("Invalid attributes reference: %s\n"
+                                         % ref)
 
     @staticmethod
     def _parse_section(item, name):

@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """
 API Blueprint (https://github.com/apiaryio/api-blueprint) parser which uses
 Markdown (https://pythonhosted.org/Markdown/).
@@ -511,7 +512,7 @@ class PayloadSection(NamedSection):
             self.media_type)
 
     def __str__(self):
-        res = "%s %s" % (self.keyword, self.name)
+        res = "%s%s" % (self.keyword, (" " + self.name) if self.name else "")
         if self.media_type is not None:
             res += " (%s/%s)" % self.media_type
         return res
@@ -545,8 +546,9 @@ class PredefinedPayloadSection(PayloadSection):
 
     @classmethod
     def parse_from_etree(cls, node):
-        name, media_type = cls.parse_definition(node.text)
+        defs = cls.parse_definition(node.text)
         desc, index = parse_description(node, 0)
+        defs += desc,
         kwargs = {
             "headers": None,
             "attributes": None,
@@ -570,10 +572,11 @@ class PredefinedPayloadSection(PayloadSection):
                         if report_warnings:
                             sys.stderr.write(
                                 "Failed to parse section \"%s\" in payload "
-                                "section %s: %s\n" % (section_name, name, e))
+                                "section %s: %s\n" % (
+                                section_name, defs[0], e))
                     else:
                         kwargs[section.NESTED_SECTION_ID] = section
-        return cls(name, media_type, desc, **kwargs)
+        return cls(*defs, **kwargs)
 
     @staticmethod
     def parse_definition(txt):
@@ -601,6 +604,54 @@ class PredefinedPayloadSection(PayloadSection):
 class ResourceModel(PredefinedPayloadSection):
     NESTED_SECTION_ID = "model"
     SECTION_TYPE = "Model"
+
+
+class ReferenceablePredefinedPayloadSection(PredefinedPayloadSection):
+    def __init__(self, name, media_type, description,
+                 headers, attributes, body, schema):
+        super(ReferenceablePredefinedPayloadSection, self).__init__(
+            name, media_type, description, headers, attributes, body, schema)
+        self._reference = None
+
+    def _copy_from_payload(self, payload):
+        if self.name is None:
+            self._name = payload.name
+        self._description = payload.description
+        self._media_type = payload.media_type
+        self._headers = payload.headers
+        self._attributes = payload.attributes
+        self._body = payload.body
+        self._schema = payload.schema
+
+    @classmethod
+    def parse_from_etree(cls, node):
+        obj = super(ReferenceablePredefinedPayloadSection, cls) \
+            .parse_from_etree(node)
+        if obj.headers is None and obj.attributes is None and \
+                obj.body is None and obj.schema is None and len(node) == 1 \
+                and node[0].tag in ("p", "pre"):
+            obj._reference = cls._extract_reference(node[0].text)
+        return obj
+
+    @staticmethod
+    def _extract_reference(txt):
+        if len(txt) > 4 and txt[0] == "[" and txt.endswith("][]"):
+            return txt[1:-3]
+        return None
+
+
+class Request(ReferenceablePredefinedPayloadSection):
+    SECTION_TYPE = "Request"
+    NESTED_SECTION_ID = "requests"
+
+
+class Response(ReferenceablePredefinedPayloadSection):
+    SECTION_TYPE = "Response"
+    NESTED_SECTION_ID = "responses"
+
+    @property
+    def http_code(self):
+        return self._name
 
 
 class ApiSection(NamedSection):
@@ -681,16 +732,6 @@ class Relation(object):
     @staticmethod
     def parse_from_etree(node):
         return Relation(node.text.split(":")[-1].strip())
-
-
-class Request(PredefinedPayloadSection):
-    SECTION_TYPE = "Request"
-    NESTED_SECTION_ID = "requests"
-
-
-class Response(PredefinedPayloadSection):
-    SECTION_TYPE = "Response"
-    NESTED_SECTION_ID = "responses"
 
 
 class Action(ApiSection):
