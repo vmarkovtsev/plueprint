@@ -45,16 +45,17 @@ if root not in sys.path:
 def main():
     m = Markdown(extensions=["plueprint"])
     m.set_output_format("apiblueprint")
-    with codecs.open("blueprint.md", "r", "utf-8") as fin:
-        txt = fin.read()
-    api = m.convert(txt)
-    print(api)
-    api[">"].print_resources()
-    for action in api["/api/"]:
-        print("  %s" % action)
-    for action in api["/api/:GET"]:
-        print("  %s" % action)
-    print(api[">>Настройка прав"])
+    tests_dir = os.path.join(os.path.dirname(__file__), "api-blueprint",
+                             "examples")
+    for doc in os.listdir(tests_dir):
+        if os.path.splitext(doc)[1] != ".md" or doc == "README.md":
+            continue
+        with codecs.open(os.path.join(tests_dir, doc), "r", "utf-8") as fin:
+            txt = fin.read()
+        api = m.convert(txt)
+        print(api)
+        api[">"].print_resources()
+        api["/"].print_resources()
 
 if __name__ == "__main__":
     main()

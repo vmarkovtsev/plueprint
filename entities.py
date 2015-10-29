@@ -57,6 +57,8 @@ def select_pos(*args):
 
 
 def get_section_name(txt):
+    if txt is None:
+        return None
     sep_pos = select_pos(txt.find(c) for c in (' ', '\t'))
     if sep_pos < 0:
         sep_pos = len(txt)
@@ -472,7 +474,8 @@ class PayloadSection(NamedSection):
             assert isinstance(body, Body)
         if schema is not None:
             assert isinstance(schema, Schema)
-        self._media_type = tuple(media_type)
+        self._media_type = \
+            tuple(media_type) if media_type is not None else None
         self._headers = headers
         self._attributes = attributes
         self._body = body

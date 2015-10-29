@@ -1,0 +1,3 @@
+[submodule "api-blueprint"]
+	path = api-blueprint
+	url = https://github.com/apiaryio/api-blueprint.git

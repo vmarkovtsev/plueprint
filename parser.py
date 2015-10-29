@@ -226,7 +226,6 @@ class APIBlueprint(object):
                 group = self._groups[None] = ResourceGroup(None, None)
         rdef = Resource.parse_definition(sequence[0].text)
         desc, index = parse_description(sequence, 1)
-        rdef += (desc,)
         if len(sequence) <= index:
             if entities.report_warnings:
                 sys.stderr.write("Skipped empty resource %s\n" % rdef[0])
@@ -237,9 +236,16 @@ class APIBlueprint(object):
                 section = self._parse_section(s, rdef[0])
                 if section is not None:
                     sections.append(section)
+                elif len(s) == 1 and s[0].text:
+                    if desc is None:
+                        desc = ""
+                    desc += s[0].text + "\n"
             index += 1
         else:
             sections = tuple()
+        if desc:
+            desc = desc.strip()
+        rdef += (desc,)
         kwargs = {s: None for s in Resource.NESTED_SECTIONS}
         kwargs.update({s.NESTED_SECTION_ID: s for s in sections})
         r = Resource(*rdef, **kwargs)
