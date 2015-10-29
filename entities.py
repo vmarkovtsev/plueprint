@@ -66,9 +66,9 @@ def get_section_name(txt):
     return txt[:sep_pos]
 
 
-def parse_description(sequence, index):
+def parse_description(sequence, index, *stop_tags):
     desc = ""
-    while len(sequence) > index and sequence[index].tag == "p":
+    while len(sequence) > index and sequence[index].tag not in stop_tags:
         desc += to_html_string(sequence[index]) + "\n"
         index += 1
     return desc.strip() if desc else None, index
@@ -258,22 +258,23 @@ class Attribute(NamedSection):
     @staticmethod
     def parse_from_etree(node):
         attr = Attribute.parse_from_string(node.text)
-        desc, index = parse_description(node, 0)
+        desc, index = parse_description(node, 0, "ul")
         if attr._description is None:
             attr._description = desc
         elif desc is not None:
             attr._description += "\n" + desc
-        if len(node) > index and node[index].tag == "ul":
-            if attr.value is not None:
-                raise ValueError("Multiple value for the same attribute %s" %
-                                 attr.name)
-            children = [Attribute.parse_from_etree(c) for c in node[index]]
-            attr._value = children
-            if attr.is_array:
-                subtype = attr.extract_array_subtype(attr.type)
-                for c in children:
-                    if c.type == "object":
-                        c._type = subtype
+        if len(node) <= index:
+            return attr
+        if attr.value is not None:
+            raise ValueError("Multiple value for the same attribute %s" %
+                             attr.name)
+        children = [Attribute.parse_from_etree(c) for c in node[index]]
+        attr._value = children
+        if attr.is_array:
+            subtype = attr.extract_array_subtype(attr.type)
+            for c in children:
+                if c.type == "object":
+                    c._type = subtype
         return attr
 
 
@@ -319,14 +320,14 @@ class Parameter(Attribute):
     @staticmethod
     def parse_from_etree(node):
         attr = Attribute.parse_from_string(node.text)
-        desc, index = parse_description(node, 0)
+        desc, index = parse_description(node, 0, "ul")
         if attr.description is None:
             attr._description = desc
         elif desc is not None:
             attr._description += "\n" + desc
         defval = None
         members = None
-        if len(node) > index and node[index].tag == "ul":
+        if len(node) > index:
             for li in node[index]:
                 if li.text.startswith("Default"):
                     if attr.required or attr.required is None:
@@ -551,7 +552,7 @@ class PredefinedPayloadSection(PayloadSection):
     @classmethod
     def parse_from_etree(cls, node):
         defs = cls.parse_definition(node.text)
-        desc, index = parse_description(node, 0)
+        desc, index = parse_description(node, 0, "pre", "ul")
         defs += desc,
         kwargs = {
             "headers": None,
@@ -577,7 +578,7 @@ class PredefinedPayloadSection(PayloadSection):
                             sys.stderr.write(
                                 "Failed to parse section \"%s\" in payload "
                                 "section %s: %s\n" % (
-                                section_name, defs[0], e))
+                                    section_name, defs[0], e))
                     else:
                         kwargs[section.NESTED_SECTION_ID] = section
         return cls(*defs, **kwargs)
@@ -704,10 +705,12 @@ class ApiSection(NamedSection):
     def id(self):
         if self.name is not None:
             return self.name
+        res = ""
+        if self.request_method is not None:
+            res += self.request_method + " "
         if self.uri_template is not None:
-            return self.uri_template
-        return self.request_method
-
+            res += self.uri_template + " "
+        return res.strip()
 
 @add_metaclass(SelfParsingSectionRegistry)
 class Relation(object):
@@ -816,7 +819,7 @@ class Action(ApiSection):
     @staticmethod
     def parse_from_etree(sequence, index):
         adef = Action.parse_definition(sequence[index].text)
-        desc, index = parse_description(sequence, index + 1)
+        desc, index = parse_description(sequence, index + 1, "ul")
         kwargs = {
             "description": desc,
             "relation": None,
@@ -825,7 +828,7 @@ class Action(ApiSection):
             "requests": [],
             "responses": []
         }
-        if len(sequence) > index and sequence[index].tag == "ul":
+        if len(sequence) > index:
             for li in sequence[index]:
                 section_name = get_section_name(li.text)
                 try:
@@ -894,7 +897,7 @@ class Resource(ApiSection):
         if self.uri_template is not None:
             middle += self.uri_template
         res += middle.strip()
-        if bpe:
+        if self.name is not None and bpe:
             res += ']'
         return res
 

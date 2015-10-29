@@ -165,14 +165,14 @@ class APIBlueprint(object):
             raise APIBlueprintParseError("Invalid or missing name section")
         self._name = root[1].text
         index = 2
-        self._overview, index = parse_description(root, index)
+        self._overview, index = parse_description(root, index, "h1")
         current = root[index]
         sequence = [current]
         tag = current.tag
         is_group = self._is_group(current)
         is_data_structures = self._is_data_structures(current)
         for item in root[index + 1:]:
-            if self._is_header(item) and item.tag == tag:
+            if self._is_header(item) and item.tag <= tag:
                 if is_group:
                     self._parse_resource_group(sequence)
                 else:
@@ -201,7 +201,7 @@ class APIBlueprint(object):
         name = sequence[0].text
         name_pos = name.find("Group") + len("Group")
         name = name[name_pos:].strip()
-        desc, index = parse_description(sequence, 1)
+        desc, index = parse_description(sequence, 1, "h2")
         self._groups[name] = group = ResourceGroup(name, desc)
         if len(sequence) <= index:
             return
@@ -222,10 +222,11 @@ class APIBlueprint(object):
             except KeyError:
                 group = self._groups[None] = ResourceGroup(None, None)
         rdef = Resource.parse_definition(sequence[0].text)
-        desc, index = parse_description(sequence, 1)
+        desc, index = parse_description(
+            sequence, 1, self._next_header_tag(sequence[0].tag), "ul")
         if len(sequence) <= index:
             if entities.report_warnings:
-                sys.stderr.write("Skipped empty resource %s\n" % rdef[0])
+                sys.stderr.write("Skipping empty resource %s\n" % rdef[0])
             return
         desc_sections = False
         if sequence[index].tag in ("ul", "ol"):
@@ -247,11 +248,30 @@ class APIBlueprint(object):
         rdef += (desc,)
         kwargs = {s: None for s in Resource.NESTED_SECTIONS}
         kwargs.update({s.NESTED_SECTION_ID: s for s in sections})
-        r = Resource(*rdef, **kwargs)
+        action_instead_of_resource = False
+        try:
+            r = Resource(*rdef, **kwargs)
+        except TypeError as e:
+            action_instead_of_resource = True
+            r = Resource(*rdef, parameters=None, attributes=None, model=None)
+            if entities.report_warnings:
+                sys.stderr.write("Invalid section in resource %s: %s" % (r, e))
         group._resources[r.id] = r
         if r.attributes is not None and r.name is not None:
             self._attributes[r.name] = r.attributes
         if len(sequence) <= index:
+            if action_instead_of_resource:
+                try:
+                    act, _ = Action.parse_from_etree(sequence, 0)
+                    act._name = r.name
+                    act._request_method = r._request_method
+                    act._uri_template = r.uri_template
+                    r._actions[act.id] = act
+                    if entities.report_warnings:
+                        sys.stderr.write("Assumed single implicit action in %s"
+                                         % r)
+                except:
+                    pass
             return
         while index < len(sequence) and self._is_header(sequence[index]):
             action, index = Action.parse_from_etree(sequence, index)
@@ -333,6 +353,10 @@ class APIBlueprint(object):
     def _is_header(item):
         return len(item.tag) == 2 and item.tag[0] == 'h' and \
             item.tag[1].isdigit()
+
+    @staticmethod
+    def _next_header_tag(tag):
+        return "%s%d" % (tag[0], (int(tag[1]) + 1))
 
     @classmethod
     def _is_group(cls, item):
