@@ -268,7 +268,16 @@ class APIBlueprint(object):
             self._data_structures[attr.name] = attr
 
     def _apply_attributes_references(self):
-        pass
+        for r in self.resources:
+            oldattr = r.attributes
+            if oldattr is not None and oldattr.reference is not None:
+                r._attributes = self._attributes[oldattr.reference]
+            for a in r:
+                if a.attributes is oldattr:
+                    a._attributes = r.attributes
+                elif a.attributes is not None and \
+                        a.attributes.reference is not None:
+                    a._attributes = self._attributes[a.attributes.reference]
 
     def _apply_model_reference(self):
         pass
