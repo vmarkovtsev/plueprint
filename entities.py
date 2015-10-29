@@ -34,6 +34,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 from collections import OrderedDict
 import json
+from markdown import to_html_string
 import re
 from six import add_metaclass, string_types
 import sys
@@ -68,7 +69,7 @@ def get_section_name(txt):
 def parse_description(sequence, index):
     desc = ""
     while len(sequence) > index and sequence[index].tag == "p":
-        desc += sequence[index].text + "\n"
+        desc += to_html_string(sequence[index]) + "\n"
         index += 1
     return desc.strip() if desc else None, index
 

@@ -38,7 +38,7 @@ from markdown.preprocessors import Preprocessor
 from markdown.treeprocessors import Treeprocessor
 from weakref import WeakValueDictionary
 from markdown.extensions import Extension
-from markdown.serializers import ElementTree
+from markdown.serializers import ElementTree, to_html_string
 from pytrie import SortedStringTrie as trie
 from .entities import ResourceGroup, Resource, select_pos, \
     SelfParsingSectionRegistry, Action, Attribute, get_section_name, \
@@ -125,7 +125,7 @@ class APIBlueprint(object):
                     item = item[:cpos]
                 else:
                     method = None
-                if item[-1] == "/":
+                if item[-1] == "/" and len(item) > 1:
                     item = item[:-1]
                 values = self._trie.longest_prefix_value(item)
                 if method is None:
@@ -164,18 +164,15 @@ class APIBlueprint(object):
         if root[1].tag != "h1":
             raise APIBlueprintParseError("Invalid or missing name section")
         self._name = root[1].text
-        if root[2].tag == "p":
-            self._overview = root[2].text
-            index = 3
-        else:
-            index = 2
+        index = 2
+        self._overview, index = parse_description(root, index)
         current = root[index]
         sequence = [current]
         tag = current.tag
         is_group = self._is_group(current)
         is_data_structures = self._is_data_structures(current)
         for item in root[index + 1:]:
-            if self._is_header(item) and item.tag <= tag:
+            if self._is_header(item) and item.tag == tag:
                 if is_group:
                     self._parse_resource_group(sequence)
                 else:
@@ -230,21 +227,23 @@ class APIBlueprint(object):
             if entities.report_warnings:
                 sys.stderr.write("Skipped empty resource %s\n" % rdef[0])
             return
+        desc_sections = False
         if sequence[index].tag in ("ul", "ol"):
             sections = []
             for s in sequence[index]:
                 section = self._parse_section(s, rdef[0])
                 if section is not None:
                     sections.append(section)
-                elif len(s) == 1 and s[0].text:
+                else:
                     if desc is None:
-                        desc = ""
-                    desc += s[0].text + "\n"
+                        desc = "<ul>\n"
+                    desc += to_html_string(s) + "\n"
+                    desc_sections = True
             index += 1
         else:
             sections = tuple()
-        if desc:
-            desc = desc.strip()
+        if desc_sections:
+            desc += "</ul>"
         rdef += (desc,)
         kwargs = {s: None for s in Resource.NESTED_SECTIONS}
         kwargs.update({s.NESTED_SECTION_ID: s for s in sections})
