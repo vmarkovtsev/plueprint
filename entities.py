@@ -183,8 +183,30 @@ class Attribute(NamedSection):
             subtype = "object"
         return subtype
 
-    @staticmethod
-    def parse_from_string(line):
+    def __str__(self):
+        res = self.name
+        if self.value is not None:
+            multivalue = not isinstance(self.value, string_types)
+            if not multivalue:
+                res += ": " + self.value
+        else:
+            multivalue = False
+        if self.type is not None:
+            res += " (" + self.type
+            if isinstance(self.required, bool):
+                res += ", " + ("optional", "required")[self.required]
+            res += ")"
+        if self.description is not None:
+            res += " - " + self.description.replace('\n', ' ')
+        if multivalue:
+            res += "\n"
+            for v in self.value:
+                for line in str(v).split('\n'):
+                    res += "  %s\n" % line
+        return res
+
+    @classmethod
+    def parse_from_string(cls, line):
         if line[0] in ('-', '+'):
             line = line[1:]
         colon_pos = line.find(':')
@@ -231,33 +253,11 @@ class Attribute(NamedSection):
             else:
                 value = [Attribute(None, subtype, None, None, v.split())
                          for v in value.split(',')]
-        return Attribute(name, type_, required, desc, value)
+        return cls(name, type_, required, desc, value)
 
-    def __str__(self):
-        res = self.name
-        if self.value is not None:
-            multivalue = not isinstance(self.value, string_types)
-            if not multivalue:
-                res += ": " + self.value
-        else:
-            multivalue = False
-        if self.type is not None:
-            res += " (" + self.type
-            if isinstance(self.required, bool):
-                res += ", " + ("optional", "required")[self.required]
-            res += ")"
-        if self.description is not None:
-            res += " - " + self.description.replace('\n', ' ')
-        if multivalue:
-            res += "\n"
-            for v in self.value:
-                for line in str(v).split('\n'):
-                    res += "  %s\n" % line
-        return res
-
-    @staticmethod
-    def parse_from_etree(node):
-        attr = Attribute.parse_from_string(node.text)
+    @classmethod
+    def parse_from_etree(cls, node):
+        attr = cls.parse_from_string(node.text)
         desc, index = parse_description(node, 0, "ul")
         if attr._description is None:
             attr._description = desc
@@ -347,6 +347,30 @@ class Parameter(Attribute):
                          defval, members)
 
 
+class ReferenceableMixin(object):
+    def __init__(self, *args, **kwargs):
+        super(ReferenceableMixin, self).__init__(*args, **kwargs)
+        self._reference = None
+
+    @staticmethod
+    def _extract_reference(txt):
+        if len(txt) > 4 and txt[0] == "[" and txt.endswith("][]"):
+            return txt[1:-3]
+        return None
+
+
+class DataStructure(Attribute, ReferenceableMixin):
+    @classmethod
+    def parse_from_etree(cls, node):
+        instance = super(DataStructure, cls).parse_from_etree(node)
+        if len(node) == 1 and node[0].tag in ("p", "pre"):
+            reference = cls._extract_reference(node[0].text)
+            if reference is not None:
+                instance._description = None
+                instance._reference = reference
+        return instance
+
+
 class Parameters(Collection(Parameter)):
     NESTED_SECTION_ID = "parameters"
     SECTION_TYPE = "Parameters"
@@ -362,10 +386,6 @@ class Attributes(Collection(Attribute)):
             children = tuple()
         super(Attributes, self).__init__(children)
         self._reference = reference
-
-    @property
-    def reference(self):
-        return self._reference
 
     @classmethod
     def parse_from_etree(cls, node):
@@ -465,7 +485,7 @@ class Schema(PredefinedAssetSection):
 
 class PayloadSection(NamedSection):
     def __init__(self, keyword, name, media_type, description,
-                 headers, attributes, body, schema):
+                 headers, attributes, body, schema, reference=None):
         super(PayloadSection, self).__init__(name, description)
         self._keyword = keyword
         if media_type is not None:
@@ -482,6 +502,7 @@ class PayloadSection(NamedSection):
         self._attributes = attributes
         self._body = body
         self._schema = schema
+        self._reference = reference
 
     @property
     def keyword(self):
@@ -611,12 +632,8 @@ class ResourceModel(PredefinedPayloadSection):
     SECTION_TYPE = "Model"
 
 
-class ReferenceablePredefinedPayloadSection(PredefinedPayloadSection):
-    def __init__(self, name, media_type, description,
-                 headers, attributes, body, schema):
-        super(ReferenceablePredefinedPayloadSection, self).__init__(
-            name, media_type, description, headers, attributes, body, schema)
-        self._reference = None
+class ReferenceablePredefinedPayloadSection(PredefinedPayloadSection,
+                                            ReferenceableMixin):
 
     def _copy_from_payload(self, payload):
         if self.name is None:
@@ -637,12 +654,6 @@ class ReferenceablePredefinedPayloadSection(PredefinedPayloadSection):
                 and node[0].tag in ("p", "pre"):
             obj._reference = cls._extract_reference(node[0].text)
         return obj
-
-    @staticmethod
-    def _extract_reference(txt):
-        if len(txt) > 4 and txt[0] == "[" and txt.endswith("][]"):
-            return txt[1:-3]
-        return None
 
 
 class Request(ReferenceablePredefinedPayloadSection):

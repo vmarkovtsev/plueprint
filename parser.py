@@ -40,9 +40,8 @@ from weakref import WeakValueDictionary
 from markdown.extensions import Extension
 from markdown.serializers import ElementTree, to_html_string
 from pytrie import SortedStringTrie as trie
-from .entities import ResourceGroup, Resource, select_pos, \
-    SelfParsingSectionRegistry, Action, Attribute, get_section_name, \
-    parse_description
+from .entities import ResourceGroup, Resource, SelfParsingSectionRegistry, \
+    Action, DataStructure, get_section_name, parse_description
 from . import entities
 
 
@@ -58,7 +57,6 @@ class APIBlueprint(object):
         self._overview = None
         self._groups = OrderedDict()
         self._trie = trie()
-        self._attributes = WeakValueDictionary()
         self._data_structures = OrderedDict()
 
         def strip():
@@ -166,36 +164,40 @@ class APIBlueprint(object):
         self._name = root[1].text
         index = 2
         self._overview, index = parse_description(root, index, "h1")
-        current = root[index]
-        sequence = [current]
-        tag = current.tag
-        is_group = self._is_group(current)
-        is_data_structures = self._is_data_structures(current)
-        for item in root[index + 1:]:
-            if self._is_header(item) and item.tag <= tag:
-                if is_group:
-                    self._parse_resource_group(sequence)
-                else:
-                    self._parse_resource(sequence, None)
-                del sequence[:]
-                tag = item.tag
-                is_group = self._is_group(item)
-                if not is_group:
-                    is_data_structures = self._is_data_structures(item)
-            sequence.append(item)
-        if is_group:
-            self._parse_resource_group(sequence)
-        elif is_data_structures:
-            self._parse_data_structures(sequence)
-        else:
-            self._parse_resource(sequence, None)
-        paths = defaultdict(lambda: defaultdict(list))
-        for a in self.actions:
-            cu = a.const_uri
-            if cu is not None:
-                paths[cu][a.request_method].append(a)
-        self._trie = trie(paths.items())
-        self._apply_attributes_references()
+        self._attributes = {}
+        try:
+            current = root[index]
+            sequence = [current]
+            tag = current.tag
+            is_group = self._is_group(current)
+            is_data_structures = self._is_data_structures(current)
+            for item in root[index + 1:]:
+                if self._is_header(item) and item.tag <= tag:
+                    if is_group:
+                        self._parse_resource_group(sequence)
+                    else:
+                        self._parse_resource(sequence, None)
+                    del sequence[:]
+                    tag = item.tag
+                    is_group = self._is_group(item)
+                    if not is_group:
+                        is_data_structures = self._is_data_structures(item)
+                sequence.append(item)
+            if is_group:
+                self._parse_resource_group(sequence)
+            elif is_data_structures:
+                self._parse_data_structure(sequence)
+            else:
+                self._parse_resource(sequence, None)
+            paths = defaultdict(lambda: defaultdict(list))
+            for a in self.actions:
+                cu = a.const_uri
+                if cu is not None:
+                    paths[cu][a.request_method].append(a)
+            self._trie = trie(paths.items())
+            self._apply_attributes_references()
+        finally:
+            del self._attributes
 
     def _parse_resource_group(self, sequence):
         name = sequence[0].text
@@ -291,16 +293,16 @@ class APIBlueprint(object):
                     rr._copy_from_payload(r.model)
             r._actions[action.id] = action
 
-    def _parse_data_structures(self, sequence):
+    def _parse_data_structure(self, sequence):
         index = 1
         while index < len(sequence):
             node = sequence[index]
             index += 1
-            if index >= len(sequence) or sequence[index].tag != "ul":
-                raise ValueError("Invalid format of data structures")
-            node.append(sequence[index])
-            index += 1
-            attr = Attribute.parse_from_etree(node)
+            while index < len(sequence) and \
+                    not self._is_header(sequence[index]):
+                node.append(sequence[index])
+                index += 1
+            attr = DataStructure.parse_from_etree(node)
             self._data_structures[attr.name] = attr
 
     def _apply_attributes_references(self):
@@ -313,19 +315,19 @@ class APIBlueprint(object):
                                      "Structures: %s\n" % ref)
         for r in self.resources:
             oldattr = r.attributes
-            if oldattr is not None and oldattr.reference is not None:
+            if oldattr is not None and oldattr._reference is not None:
                 r._attributes = self._attributes.get(
-                    oldattr.reference,
-                    self._data_structures.get(oldattr.reference))
+                    oldattr._reference,
+                    self._data_structures.get(oldattr._reference))
                 if r.attributes is None and entities.report_warnings:
                     sys.stderr.write("Invalid attributes reference: %s\n" %
-                                     oldattr.reference)
+                                     oldattr._reference)
             for a in r:
                 if a.attributes is oldattr:
                     a._attributes = r.attributes
                 elif a.attributes is not None and \
-                        a.attributes.reference is not None:
-                    ref = a.attributes.reference
+                        a.attributes._reference is not None:
+                    ref = a.attributes._reference
                     a._attributes = self._attributes.get(
                         ref, self._data_structures.get(ref))
                     if a.attributes is None and entities.report_warnings:
