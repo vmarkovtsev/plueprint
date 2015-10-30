@@ -60,7 +60,7 @@ def select_pos(*args):
 def get_section_name(txt):
     if txt is None:
         return None
-    sep_pos = select_pos(txt.find(c) for c in (' ', '\t'))
+    sep_pos = select_pos(txt.find(c) for c in (' ', '\t', ':'))
     if sep_pos < 0:
         sep_pos = len(txt)
     return txt[:sep_pos]
@@ -209,17 +209,6 @@ class Attribute(NamedSection):
     def parse_from_string(cls, line):
         if line[0] in ('-', '+'):
             line = line[1:]
-        colon_pos = line.find(':')
-        if colon_pos > -1:
-            name = line[:colon_pos].strip()
-            line = line[colon_pos + 1:]
-        else:
-            sep_pos = select_pos(line.find(c) for c in (' ', '\t'))
-            if sep_pos > -1:
-                name = line[:sep_pos].strip()
-                line = line[sep_pos + 1:].strip()
-            else:
-                raise ValueError("Invalid format")
         desc_pos = line.rfind('-')
         if desc_pos > -1:
             desc = line[desc_pos + 1:].strip()
@@ -244,7 +233,13 @@ class Attribute(NamedSection):
         else:
             type_ = None
             required = None
-        value = line if line else None
+        colon_pos = line.find(':')
+        if colon_pos > -1:
+            name = line[:colon_pos].strip()
+            value = line[colon_pos + 1:].strip() or None
+        else:
+            name = line
+            value = None
         if value is not None:
             try:
                 subtype = Attribute.extract_array_subtype(type_)
@@ -608,7 +603,7 @@ class PredefinedPayloadSection(PayloadSection):
     def parse_definition(txt):
         sep_pos = select_pos(txt.find(c) for c in (' ', '\t'))
         if sep_pos < 0:
-            raise ValueError("Invalid payload section format")
+            return None, None
         txt = txt[sep_pos + 1:].strip()
         if not txt:
             return None, None

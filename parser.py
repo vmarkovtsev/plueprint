@@ -137,6 +137,12 @@ class APIBlueprint(object):
                 self.name, self.format, len(self), self.count_resources(),
                 self.count_actions())
 
+    def keys(self):
+        return self._groups.keys()
+
+    def values(self):
+        return self._groups.values()
+
     def count_resources(self):
         return sum(len(g) for g in self)
 
@@ -165,6 +171,7 @@ class APIBlueprint(object):
         index = 2
         self._overview, index = parse_description(root, index, "h1")
         self._attributes = {}
+        self._models = {}
         try:
             current = root[index]
             sequence = [current]
@@ -198,6 +205,7 @@ class APIBlueprint(object):
             self._apply_attributes_references()
         finally:
             del self._attributes
+            del self._models
 
     def _parse_resource_group(self, sequence):
         name = sequence[0].text
@@ -216,6 +224,8 @@ class APIBlueprint(object):
                 del children[:]
                 tag = item.tag
             children.append(item)
+        if len(children) > 0:
+            self._parse_resource(children, group)
 
     def _parse_resource(self, sequence, group):
         if group is None:
@@ -257,7 +267,11 @@ class APIBlueprint(object):
             action_instead_of_resource = True
             r = Resource(*rdef, parameters=None, attributes=None, model=None)
             if entities.report_warnings:
-                sys.stderr.write("Invalid section in resource %s: %s" % (r, e))
+                sys.stderr.write("Invalid section in resource %s: %s\n" %
+                                 (r, e))
+        else:
+            if r.model is not None and r.name is not None:
+                self._models[r.name] = r.model
         group._resources[r.id] = r
         if r.attributes is not None and r.name is not None:
             self._attributes[r.name] = r.attributes
@@ -270,8 +284,8 @@ class APIBlueprint(object):
                     act._uri_template = r.uri_template
                     r._actions[act.id] = act
                     if entities.report_warnings:
-                        sys.stderr.write("Assumed single implicit action in %s"
-                                         % r)
+                        sys.stderr.write(
+                            "Assumed single implicit action in %s\n" % r)
                 except:
                     pass
             return
@@ -285,12 +299,12 @@ class APIBlueprint(object):
                            action.responses.values()):
                 if rr._reference is None:
                     continue
-                if rr._reference != r.name:
+                if rr._reference not in self._models:
                     if entities.report_warnings:
                         sys.stderr.write("Bad reference: %s\n" %
                                          rr._reference)
                 else:
-                    rr._copy_from_payload(r.model)
+                    rr._copy_from_payload(self._models[rr._reference])
             r._actions[action.id] = action
 
     def _parse_data_structure(self, sequence):
@@ -384,7 +398,7 @@ class IndentationAligner(Preprocessor):
         for line in lines:
             if line:
                 i = 0
-                while line[i] == ' ':
+                while i < len(line) and line[i] == ' ':
                     i += 1
                 if i > 0 and i % 4:
                     line = ' ' * (i + (4 - (i % 4))) + line[i:]
