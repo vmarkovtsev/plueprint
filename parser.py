@@ -416,6 +416,23 @@ class TitleLifter(Treeprocessor):
                 last.text = last[0].text
                 last.remove(last[0])
             lifo.extend(last)
+        h1_count = sum(1 for item in root
+                       if item.tag == "h1" and item.text != "Data Structures")
+        if h1_count != 1:
+            return
+        if entities.report_warnings:
+            sys.stderr.write("There is only one <h1> in the document => "
+                             "raising all the other headers\n")
+        for item in root:
+            tag = item.tag
+            if tag == "h1":
+                if item.text == "Data Structures":
+                    break
+                else:
+                    continue
+            if len(tag) != 2 or tag[0] != "h" or not tag[1].isdigit():
+                continue
+            item.tag = "h%d" % (int(tag[1]) - 1)
 
 
 class PlueprintExtension(Extension):
