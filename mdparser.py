@@ -41,7 +41,7 @@ from markdown.extensions import Extension
 from markdown.serializers import ElementTree, to_html_string
 from pytrie import SortedStringTrie as trie
 from .entities import ResourceGroup, Resource, SelfParsingSectionRegistry, \
-    Action, DataStructure, get_section_name, parse_description
+    Action, DataStructure, ReprAsStr, get_section_name, parse_description
 from . import entities
 
 
@@ -49,7 +49,7 @@ class APIBlueprintParseError(Exception):
     pass
 
 
-class APIBlueprint(object):
+class APIBlueprint(ReprAsStr):
     def __init__(self):
         super(APIBlueprint, self).__init__()
         self._metadata = {}

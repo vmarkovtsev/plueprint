@@ -1,7 +1,6 @@
 import argparse
 import codecs
 from markdown import Markdown
-import os
 import pickle
 
 

@@ -101,7 +101,12 @@ class SelfParsingSectionRegistry(type):
         super(SelfParsingSectionRegistry, cls).__init__(what, bases, clsdict)
 
 
-class NamedSection(object):
+class ReprAsStr(object):
+    def __repr__(self):
+        return str(self)
+
+
+class NamedSection(ReprAsStr):
     def __init__(self, name, description):
         super(NamedSection, self).__init__()
         self._name = name
@@ -118,7 +123,7 @@ class NamedSection(object):
 
 def Collection(child_type):
     @add_metaclass(SelfParsingSectionRegistry)
-    class Base(object):
+    class Base(ReprAsStr):
         def __init__(self, children):
             super(Base, self).__init__()
             self._children = OrderedDict()
@@ -273,23 +278,14 @@ class Attribute(NamedSection):
         return attr
 
 
-class ParameterMember(object):
-    def __init__(self, name, description):
-        self._name = name
-        self._description = description
-
-    @property
-    def name(self):
-        return self._name
-
-    @property
-    def description(self):
-        return self._description
-
+class ParameterMember(NamedSection):
     @staticmethod
     def parse_from_string(txt):
         attr = Attribute.parse_from_string(txt)
         return ParameterMember(attr.name, attr.description)
+
+    def __str__(self):
+        return "%s - %s" % (self.name, self.description)
 
 
 class Parameter(Attribute):
@@ -396,7 +392,7 @@ class Attributes(Collection(Attribute)):
 
 
 @add_metaclass(SelfParsingSectionRegistry)
-class Headers(object):
+class Headers(ReprAsStr):
     NESTED_SECTION_ID = "headers"
     SECTION_TYPE = "Headers"
 
@@ -435,7 +431,7 @@ class Headers(object):
         return Headers(headers)
 
 
-class AssetSection(object):
+class AssetSection(ReprAsStr):
     def __init__(self, keyword, content):
         super(AssetSection, self).__init__()
         self._keyword = keyword
@@ -719,7 +715,7 @@ class ApiSection(NamedSection):
         return res.strip()
 
 @add_metaclass(SelfParsingSectionRegistry)
-class Relation(object):
+class Relation(ReprAsStr):
     NESTED_SECTION_ID = "relation"
     SECTION_TYPE = "Relation"
 
