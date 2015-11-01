@@ -32,7 +32,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 """
 
 
-from .parser import PlueprintExtension
+from .mdparser import PlueprintExtension
 
 
 def makeExtension(**kwargs):

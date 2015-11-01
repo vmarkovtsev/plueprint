@@ -1,0 +1,8 @@
+include __init__.py
+include __main__.py
+include entities.py
+include parser.py
+include LICENSE
+include README.md
+include setup.py
+include requirements.txt
