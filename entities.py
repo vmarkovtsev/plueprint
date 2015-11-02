@@ -30,7 +30,7 @@ ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 """
-
+from itertools import chain
 
 from collections import OrderedDict
 import json
@@ -39,6 +39,8 @@ import re
 from six import add_metaclass, string_types
 import sys
 from types import GeneratorType
+from uritemplate import URITemplate
+import weakref
 from xml.etree import ElementTree
 
 
@@ -84,6 +86,20 @@ def from_none(exc):
     return exc
 
 
+def property_with_parent(name, ptype):
+    def getter(self):
+        return getattr(self, "_" + name)
+
+    def setter(self, value):
+        if value is not None:
+            assert isinstance(value, ptype)
+            if value.parent is None:
+                value._parent = self
+        setattr(self, "_" + name, value)
+
+    return property(getter, setter)
+
+
 class SelfParsingSectionRegistryDict(type):
     registry = {}
 
@@ -101,14 +117,32 @@ class SelfParsingSectionRegistry(type):
         super(SelfParsingSectionRegistry, cls).__init__(what, bases, clsdict)
 
 
-class ReprAsStr(object):
+class Section(object):
+    def __init__(self, parent):
+        super(Section, self).__init__()
+        self._parent = parent
+
+    @property
+    def parent(self):
+        return self._parent
+
+    @property
+    def _parent(self):
+        return self.__parent
+
+    @_parent.setter
+    def _parent(self, value):
+        if value is not None and not isinstance(value, weakref.ProxyType):
+            value = weakref.proxy(value)
+        self.__parent = value
+
     def __repr__(self):
         return str(self)
 
 
-class NamedSection(ReprAsStr):
-    def __init__(self, name, description):
-        super(NamedSection, self).__init__()
+class NamedSection(Section):
+    def __init__(self, parent, name, description):
+        super(NamedSection, self).__init__(parent)
         self._name = name
         self._description = description
 
@@ -123,12 +157,14 @@ class NamedSection(ReprAsStr):
 
 def Collection(child_type):
     @add_metaclass(SelfParsingSectionRegistry)
-    class Base(ReprAsStr):
-        def __init__(self, children):
-            super(Base, self).__init__()
+    class Base(Section):
+        def __init__(self, parent, children):
+            super(Base, self).__init__(parent)
             self._children = OrderedDict()
             for child in children:
                 assert isinstance(child, child_type)
+                if child.parent is None:
+                    child._parent = self
                 self._children[child.name] = child
             self.__dict__.update(self._children)
 
@@ -143,17 +179,23 @@ def Collection(child_type):
             return self._children[item]
 
         @classmethod
-        def parse_from_etree(cls, node):
+        def parse_from_etree(cls, parent, node):
             if len(node) == 0 or node[0].tag != "ul":
                 raise ValueError("Invalid format: %s" % cls.__name__)
-            return cls(child_type.parse_from_etree(c) for c in node[0])
+            return cls(
+                parent,
+                (child_type.parse_from_etree(None, c) for c in node[0]))
+
+        def __str__(self):
+            return "%s with %d items" % (
+                type(self).__name__, len(self._children))
 
     return Base
 
 
 class Attribute(NamedSection):
-    def __init__(self, name, type_, required, description, value):
-        super(Attribute, self).__init__(name, description)
+    def __init__(self, parent, name, type_, required, description, value):
+        super(Attribute, self).__init__(parent, name, description)
         self._type = type_ or "object"
         self._required = required
         self._description = description
@@ -211,7 +253,7 @@ class Attribute(NamedSection):
         return res
 
     @classmethod
-    def parse_from_string(cls, line):
+    def parse_from_string(cls, parent, line):
         if line[0] in ('-', '+'):
             line = line[1:]
         desc_pos = line.rfind('-')
@@ -251,13 +293,18 @@ class Attribute(NamedSection):
             except ValueError:
                 pass
             else:
-                value = [Attribute(None, subtype, None, None, v.split())
-                         for v in value.split(',')]
-        return cls(name, type_, required, desc, value)
+                value = [Attribute(None, None, subtype, None, None,
+                                   v.split()) for v in value.split(',')]
+        instance = cls(parent, name, type_, required, desc, value)
+        if isinstance(instance.value, list):
+            for child in instance.value:
+                if isinstance(child, Attribute):
+                    child._parent = instance
+        return instance
 
     @classmethod
-    def parse_from_etree(cls, node):
-        attr = cls.parse_from_string(node.text)
+    def parse_from_etree(cls, parent, node):
+        attr = cls.parse_from_string(parent, node.text)
         desc, index = parse_description(node, 0, "ul")
         if attr._description is None:
             attr._description = desc
@@ -268,7 +315,7 @@ class Attribute(NamedSection):
         if attr.value is not None:
             raise ValueError("Multiple value for the same attribute %s" %
                              attr.name)
-        children = [Attribute.parse_from_etree(c) for c in node[index]]
+        children = [Attribute.parse_from_etree(attr, c) for c in node[index]]
         attr._value = children
         if attr.is_array:
             subtype = attr.extract_array_subtype(attr.type)
@@ -280,19 +327,19 @@ class Attribute(NamedSection):
 
 class ParameterMember(NamedSection):
     @staticmethod
-    def parse_from_string(txt):
-        attr = Attribute.parse_from_string(txt)
-        return ParameterMember(attr.name, attr.description)
+    def parse_from_string(parent, txt):
+        attr = Attribute.parse_from_string(parent, txt)
+        return ParameterMember(parent, attr.name, attr.description)
 
     def __str__(self):
         return "%s - %s" % (self.name, self.description)
 
 
 class Parameter(Attribute):
-    def __init__(self, name, type_, required, description, value,
+    def __init__(self, parent, name, type_, required, description, value,
                  default_value, members):
-        super(Parameter, self).__init__(name, type_, required, description,
-                                        value)
+        super(Parameter, self).__init__(
+            parent, name, type_, required, description, value)
         self._default_value = default_value
         if members is not None:
             assert isinstance(members, (tuple, list))
@@ -308,9 +355,9 @@ class Parameter(Attribute):
     def members(self):
         return self._members
 
-    @staticmethod
-    def parse_from_etree(node):
-        attr = Attribute.parse_from_string(node.text)
+    @classmethod
+    def parse_from_etree(cls, parent, node):
+        attr = Attribute.parse_from_string(parent, node.text)
         desc, index = parse_description(node, 0, "ul")
         if attr.description is None:
             attr._description = desc
@@ -332,10 +379,14 @@ class Parameter(Attribute):
                 elif li.text.startswith("Members"):
                     if len(li) == 0 or li[0].tag != "ul":
                         raise ValueError("Invalid format: %s" % attr.name)
-                    members = [ParameterMember.parse_from_string(m.text)
+                    members = [ParameterMember.parse_from_string(None, m.text)
                                for m in li[0]]
-        return Parameter(attr.name, attr.type, attr.required, desc, attr.value,
-                         defval, members)
+        instance = Parameter(
+            parent, attr.name, attr.type, attr.required, desc, attr.value,
+            defval, members)
+        for member in instance.members:
+            member._parent = instance
+        return instance
 
 
 class ReferenceableMixin(object):
@@ -352,8 +403,8 @@ class ReferenceableMixin(object):
 
 class DataStructure(Attribute, ReferenceableMixin):
     @classmethod
-    def parse_from_etree(cls, node):
-        instance = super(DataStructure, cls).parse_from_etree(node)
+    def parse_from_etree(cls, parent, node):
+        instance = super(DataStructure, cls).parse_from_etree(parent, node)
         if len(node) == 1 and node[0].tag in ("p", "pre"):
             reference = cls._extract_reference(node[0].text)
             if reference is not None:
@@ -371,33 +422,33 @@ class Attributes(Collection(Attribute)):
     NESTED_SECTION_ID = "attributes"
     SECTION_TYPE = "Attributes"
 
-    def __init__(self, children, reference=None):
+    def __init__(self, parent, children, reference=None):
         if reference is not None:
             assert children is None
             children = tuple()
-        super(Attributes, self).__init__(children)
+        super(Attributes, self).__init__(parent, children)
         self._reference = reference
 
     @classmethod
-    def parse_from_etree(cls, node):
+    def parse_from_etree(cls, parent, node):
         try:
-            return super(Attributes, cls).parse_from_etree(node)
+            return super(Attributes, cls).parse_from_etree(parent, node)
         except ValueError as e:
             if node.text[-1] == ')':
                 br_pos = node.text.rfind('(')
                 if br_pos > -1:
                     reference = node.text[br_pos + 1:-1]
-                    return Attributes(None, reference)
+                    return Attributes(None, None, reference)
             raise from_none(e)
 
 
 @add_metaclass(SelfParsingSectionRegistry)
-class Headers(ReprAsStr):
+class Headers(Section):
     NESTED_SECTION_ID = "headers"
     SECTION_TYPE = "Headers"
 
-    def __init__(self, headers):
-        super(Headers, self).__init__()
+    def __init__(self, parent, headers):
+        super(Headers, self).__init__(parent)
         self._headers = OrderedDict(headers) if headers else OrderedDict()
 
     def __iter__(self):
@@ -420,7 +471,7 @@ class Headers(ReprAsStr):
         return "\n".join("%s: %s" % p for p in self)
 
     @staticmethod
-    def parse_from_etree(node):
+    def parse_from_etree(parent, node):
         if len(node) == 0 or node[0].tag not in ("p", "pre"):
             raise ValueError("Invalid headers section format")
         if node[0].text:
@@ -428,12 +479,12 @@ class Headers(ReprAsStr):
                            for line in node[0].text.split('\n'))
         else:
             headers = None
-        return Headers(headers)
+        return Headers(parent, headers)
 
 
-class AssetSection(ReprAsStr):
-    def __init__(self, keyword, content):
-        super(AssetSection, self).__init__()
+class AssetSection(Section):
+    def __init__(self, parent, keyword, content):
+        super(AssetSection, self).__init__(parent)
         self._keyword = keyword
         self._content = content
 
@@ -451,17 +502,17 @@ class AssetSection(ReprAsStr):
 
 @add_metaclass(SelfParsingSectionRegistry)
 class PredefinedAssetSection(AssetSection):
-    def __init__(self, content):
+    def __init__(self, parent, content):
         super(PredefinedAssetSection, self).__init__(
-            self.SECTION_TYPE, content)
+            parent, self.SECTION_TYPE, content)
 
     @classmethod
-    def parse_from_etree(cls, node):
+    def parse_from_etree(cls, parent, node):
         if len(node) == 0:
             raise ValueError("Assets section is empty")
         if node[0].tag not in ("pre", "p"):
             raise ValueError("Invalid format of asset section")
-        return cls(node[0].text)
+        return cls(parent, node[0].text)
 
 
 class Body(PredefinedAssetSection):
@@ -475,9 +526,9 @@ class Schema(PredefinedAssetSection):
 
 
 class PayloadSection(NamedSection):
-    def __init__(self, keyword, name, media_type, description,
+    def __init__(self, parent, keyword, name, media_type, description,
                  headers, attributes, body, schema, reference=None):
-        super(PayloadSection, self).__init__(name, description)
+        super(PayloadSection, self).__init__(parent, name, description)
         self._keyword = keyword
         if media_type is not None:
             assert isinstance(media_type, (tuple, list))
@@ -519,6 +570,11 @@ class PayloadSection(NamedSection):
     def schema(self):
         return self._schema
 
+    _headers = property_with_parent("_headers", Headers)
+    _attributes = property_with_parent("_attributes", Attributes)
+    _body = property_with_parent("_body", Body)
+    _schema = property_with_parent("_schema", Schema)
+
     def value(self):
         if self.media_type == ("application", "json"):
             return json.loads(self.body)
@@ -555,14 +611,14 @@ class PayloadSection(NamedSection):
 
 @add_metaclass(SelfParsingSectionRegistry)
 class PredefinedPayloadSection(PayloadSection):
-    def __init__(self, name, media_type, description,
+    def __init__(self, parent, name, media_type, description,
                  headers, attributes, body, schema):
         super(PredefinedPayloadSection, self).__init__(
-            self.SECTION_TYPE, name, media_type, description, headers,
+            parent, self.SECTION_TYPE, name, media_type, description, headers,
             attributes, body, schema)
 
     @classmethod
-    def parse_from_etree(cls, node):
+    def parse_from_etree(cls, parent, node):
         defs = cls.parse_definition(node.text)
         desc, index = parse_description(node, 0, "pre", "ul")
         defs += desc,
@@ -574,13 +630,13 @@ class PredefinedPayloadSection(PayloadSection):
         }
         if len(node) > index:
             if node[index].tag == "pre":
-                kwargs["body"] = Body(node[index].text)
+                kwargs["body"] = Body(None, node[index].text)
             elif node[index].tag == "ul":
                 for li in node[index]:
                     section_name = get_section_name(li.text)
                     try:
                         section = SelfParsingSectionRegistry[
-                            section_name].parse_from_etree(li)
+                            section_name].parse_from_etree(None, li)
                     except KeyError:
                         if report_warnings:
                             sys.stderr.write(
@@ -593,7 +649,7 @@ class PredefinedPayloadSection(PayloadSection):
                                     section_name, defs[0], e))
                     else:
                         kwargs[section.NESTED_SECTION_ID] = section
-        return cls(*defs, **kwargs)
+        return cls(parent, *defs, **kwargs)
 
     @staticmethod
     def parse_definition(txt):
@@ -618,13 +674,12 @@ class PredefinedPayloadSection(PayloadSection):
         return name, media_type
 
 
-class ResourceModel(PredefinedPayloadSection):
+class Model(PredefinedPayloadSection):
     NESTED_SECTION_ID = "model"
     SECTION_TYPE = "Model"
 
 
-class ReferenceablePredefinedPayloadSection(PredefinedPayloadSection,
-                                            ReferenceableMixin):
+class RRPredefinedPayloadSection(PredefinedPayloadSection, ReferenceableMixin):
 
     def _copy_from_payload(self, payload):
         if self.name is None:
@@ -637,9 +692,9 @@ class ReferenceablePredefinedPayloadSection(PredefinedPayloadSection,
         self._schema = payload.schema
 
     @classmethod
-    def parse_from_etree(cls, node):
-        obj = super(ReferenceablePredefinedPayloadSection, cls) \
-            .parse_from_etree(node)
+    def parse_from_etree(cls, parent, node):
+        obj = super(RRPredefinedPayloadSection, cls).parse_from_etree(
+            parent, node)
         if obj.headers is None and obj.attributes is None and \
                 obj.body is None and obj.schema is None and len(node) == 1 \
                 and node[0].tag in ("p", "pre"):
@@ -647,12 +702,23 @@ class ReferenceablePredefinedPayloadSection(PredefinedPayloadSection,
         return obj
 
 
-class Request(ReferenceablePredefinedPayloadSection):
+class Request(RRPredefinedPayloadSection):
     SECTION_TYPE = "Request"
     NESTED_SECTION_ID = "requests"
 
+    @property
+    def uri(self):
+        values = {}
+        for p in chain(self.parent.parent.parameters or tuple(),
+                       self.parent.parameters or tuple()):
+            if p.default_value is not None:
+                values[p.name] = p.default_value
+            if p.value is not None:
+                values[p.name] = p.value
+        return self.uri_template.expand(values)
 
-class Response(ReferenceablePredefinedPayloadSection):
+
+class Response(RRPredefinedPayloadSection):
     SECTION_TYPE = "Response"
     NESTED_SECTION_ID = "responses"
 
@@ -665,13 +731,14 @@ class ApiSection(NamedSection):
     NESTED_SECTIONS = "parameters", "attributes"
     URL_PATH_PATH_REGEXP = re.compile("^[\w\-\.]*$]")
 
-    def __init__(self, name, description, request_method, uri_template,
+    def __init__(self, parent, name, description, request_method, uri_template,
                  parameters, attributes):
         assert parameters is None or isinstance(parameters, Parameters)
         assert attributes is None or isinstance(attributes, Attributes)
-        super(ApiSection, self).__init__(name, description)
+        super(ApiSection, self).__init__(parent, name, description)
         self._request_method = request_method
-        self._uri_template = uri_template
+        self._uri_template = URITemplate(uri_template) \
+            if uri_template else None
         self._parameters = parameters
         self._attributes = attributes
 
@@ -684,24 +751,15 @@ class ApiSection(NamedSection):
         return self._uri_template
 
     @property
-    def const_uri(self):
-        if self.uri_template is None:
-            return None
-        parts = self.uri_template.split('/')
-        const_parts = []
-        for p in parts:
-            if not self.URL_PATH_PATH_REGEXP.match(p):
-                break
-            const_parts.append(p)
-        return "/" + "/".join(const_parts)
-
-    @property
     def parameters(self):
         return self._parameters
 
     @property
     def attributes(self):
         return self._attributes
+
+    _parameters = property_with_parent("_parameters", Parameters)
+    _attributes = property_with_parent("_attributes", Attributes)
 
     @property
     def id(self):
@@ -711,16 +769,17 @@ class ApiSection(NamedSection):
         if self.request_method is not None:
             res += self.request_method + " "
         if self.uri_template is not None:
-            res += self.uri_template + " "
+            res += str(self.uri_template) + " "
         return res.strip()
 
+
 @add_metaclass(SelfParsingSectionRegistry)
-class Relation(ReprAsStr):
+class Relation(Section):
     NESTED_SECTION_ID = "relation"
     SECTION_TYPE = "Relation"
 
-    def __init__(self, link_id):
-        super(Relation, self).__init__()
+    def __init__(self, parent, link_id):
+        super(Relation, self).__init__(parent)
         self._link_id = link_id
 
     @property
@@ -731,24 +790,24 @@ class Relation(ReprAsStr):
         return "Relation: " + self._link_id
 
     @staticmethod
-    def parse_from_string(txt):
+    def parse_from_string(parent, txt):
         txt = txt.strip()
         rel_key = "Relation:"
         if not txt.startswith(rel_key):
             raise ValueError("Invalid format")
-        return Relation(txt[len(rel_key):].strip())
+        return Relation(parent, txt[len(rel_key):].strip())
 
     @staticmethod
-    def parse_from_etree(node):
-        return Relation(node.text.split(":")[-1].strip())
+    def parse_from_etree(parent, node):
+        return Relation(parent, node.text.split(":")[-1].strip())
 
 
 class Action(ApiSection):
     NESTED_SECTIONS = ApiSection.NESTED_SECTIONS + ("relation",)
 
-    def __init__(self, name, request_method, uri_template, description,
+    def __init__(self, parent, name, request_method, uri_template, description,
                  relation, parameters, attributes, requests, responses):
-        super(Action, self).__init__(name, description, request_method,
+        super(Action, self).__init__(parent, name, description, request_method,
                                      uri_template, parameters, attributes)
         if relation is not None:
             assert isinstance(relation, Relation)
@@ -766,6 +825,8 @@ class Action(ApiSection):
         self._requests = OrderedDict(iter_r(requests))
         index = [0]
         self._responses = OrderedDict(iter_r(responses))
+        for r in chain(requests, responses):
+            r._parent = self
 
     @property
     def relation(self):
@@ -778,6 +839,19 @@ class Action(ApiSection):
     @property
     def responses(self):
         return self._responses
+
+    @property
+    def uri(self):
+        values = {}
+        for p in chain(self.parent.parameters or tuple(),
+                       self.parameters or tuple()):
+            if p.default_value is not None:
+                values[p.name] = p.default_value
+            if p.value is not None:
+                values[p.name] = p.value
+        return self.uri_template.expand(values)
+
+    _relation = property_with_parent("_relation", Relation)
 
     def __str__(self):
         res = "Action "
@@ -792,7 +866,7 @@ class Action(ApiSection):
         if self.request_method is not None:
             middle += self.request_method + " "
         if self.uri_template is not None:
-            middle += self.uri_template
+            middle += str(self.uri_template)
         res += middle.strip() + "]"
         return res
 
@@ -819,7 +893,7 @@ class Action(ApiSection):
         return name, method, template
 
     @staticmethod
-    def parse_from_etree(sequence, index):
+    def parse_from_etree(parent, sequence, index):
         adef = Action.parse_definition(sequence[index].text)
         desc, index = parse_description(sequence, index + 1, "ul")
         kwargs = {
@@ -835,7 +909,7 @@ class Action(ApiSection):
                 section_name = get_section_name(li.text)
                 try:
                     section = SelfParsingSectionRegistry[
-                        section_name].parse_from_etree(li)
+                        section_name].parse_from_etree(None, li)
                 except KeyError:
                     if report_warnings:
                         sys.stderr.write(
@@ -858,23 +932,36 @@ class Action(ApiSection):
         for req in kwargs["requests"]:
             if req.attributes is None:
                 req._attributes = kwargs["attributes"]
-        return Action(*adef, **kwargs), index
+        return Action(parent, *adef, **kwargs), index
 
 
 class Resource(ApiSection):
     NESTED_SECTIONS = ApiSection.NESTED_SECTIONS + ("model",)
 
-    def __init__(self, name, request_method, uri_template, description,
+    def __init__(self, parent, name, request_method, uri_template, description,
                  parameters, attributes, model):
-        assert model is None or isinstance(model, ResourceModel)
-        super(Resource, self).__init__(name, description, request_method,
-                                       uri_template, parameters, attributes)
+        assert model is None or isinstance(model, Model)
+        super(Resource, self).__init__(
+            parent, name, description, request_method, uri_template,
+            parameters, attributes)
         self._model = model
         self._actions = OrderedDict()
 
     @property
     def model(self):
         return self._model
+
+    @property
+    def uri(self):
+        values = {}
+        for p in self.parameters or tuple():
+            if p.default_value is not None:
+                values[p.name] = p.default_value
+            if p.value is not None:
+                values[p.name] = p.value
+        return self.uri_template.expand(values)
+
+    _model = property_with_parent("_model", Model)
 
     def __iter__(self):
         for action in self._actions.values():
@@ -897,7 +984,7 @@ class Resource(ApiSection):
         if self.request_method is not None:
             middle += self.request_method + " "
         if self.uri_template is not None:
-            middle += self.uri_template
+            middle += str(self.uri_template)
         res += middle.strip()
         if self.name is not None and bpe:
             res += ']'
@@ -937,8 +1024,8 @@ class Resource(ApiSection):
 
 
 class ResourceGroup(NamedSection):
-    def __init__(self, name, description):
-        super(ResourceGroup, self).__init__(name, description)
+    def __init__(self, parent, name, description):
+        super(ResourceGroup, self).__init__(parent, name, description)
         self._resources = OrderedDict()
 
     def __getitem__(self, item):

@@ -1,3 +1,4 @@
 Markdown<3
 pytrie==0.2
 six>=1
+uritemplate.py

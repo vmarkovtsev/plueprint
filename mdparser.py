@@ -36,12 +36,12 @@ import sys
 from collections import OrderedDict, defaultdict
 from markdown.preprocessors import Preprocessor
 from markdown.treeprocessors import Treeprocessor
-from weakref import WeakValueDictionary
 from markdown.extensions import Extension
 from markdown.serializers import ElementTree, to_html_string
 from pytrie import SortedStringTrie as trie
 from .entities import ResourceGroup, Resource, SelfParsingSectionRegistry, \
-    Action, DataStructure, ReprAsStr, get_section_name, parse_description
+    Action, DataStructure, Section, get_section_name, parse_description, \
+    Attributes
 from . import entities
 
 
@@ -49,7 +49,7 @@ class APIBlueprintParseError(Exception):
     pass
 
 
-class APIBlueprint(ReprAsStr):
+class APIBlueprint(object):
     def __init__(self):
         super(APIBlueprint, self).__init__()
         self._metadata = {}
@@ -137,6 +137,9 @@ class APIBlueprint(ReprAsStr):
                 self.name, self.format, len(self), self.count_resources(),
                 self.count_actions())
 
+    def __repr__(self):
+        return str(self)
+
     def keys(self):
         return self._groups.keys()
 
@@ -198,9 +201,14 @@ class APIBlueprint(ReprAsStr):
                 self._parse_resource(sequence, None)
             paths = defaultdict(lambda: defaultdict(list))
             for a in self.actions:
-                cu = a.const_uri
+                cu = a.uri
                 if cu is not None:
-                    paths[cu][a.request_method].append(a)
+                    path = ""
+                    paths["/"][a.request_method].append(a)
+                    for sub in cu.split('/'):
+                        if sub:
+                            path += "/" + sub
+                            paths[path][a.request_method].append(a)
             self._trie = trie(paths.items())
             self._apply_attributes_references()
         finally:
@@ -212,7 +220,7 @@ class APIBlueprint(ReprAsStr):
         name_pos = name.find("Group") + len("Group")
         name = name[name_pos:].strip()
         desc, index = parse_description(sequence, 1, "h2")
-        self._groups[name] = group = ResourceGroup(name, desc)
+        self._groups[name] = group = ResourceGroup(self, name, desc)
         if len(sequence) <= index:
             return
         current = sequence[index]
@@ -232,7 +240,7 @@ class APIBlueprint(ReprAsStr):
             try:
                 group = self._groups[None]
             except KeyError:
-                group = self._groups[None] = ResourceGroup(None, None)
+                group = self._groups[None] = ResourceGroup(self, None, None)
         rdef = Resource.parse_definition(sequence[0].text)
         desc, index = parse_description(
             sequence, 1, self._next_header_tag(sequence[0].tag), "ul")
@@ -244,7 +252,7 @@ class APIBlueprint(ReprAsStr):
         if sequence[index].tag in ("ul", "ol"):
             sections = []
             for s in sequence[index]:
-                section = self._parse_section(s, rdef[0])
+                section = self._parse_section(None, s, rdef[0])
                 if section is not None:
                     sections.append(section)
                 else:
@@ -262,10 +270,11 @@ class APIBlueprint(ReprAsStr):
         kwargs.update({s.NESTED_SECTION_ID: s for s in sections})
         action_instead_of_resource = False
         try:
-            r = Resource(*rdef, **kwargs)
+            r = Resource(group, *rdef, **kwargs)
         except TypeError as e:
             action_instead_of_resource = True
-            r = Resource(*rdef, parameters=None, attributes=None, model=None)
+            r = Resource(group, *rdef, parameters=None, attributes=None,
+                         model=None)
             if entities.report_warnings:
                 sys.stderr.write("Invalid section in resource %s: %s\n" %
                                  (r, e))
@@ -278,9 +287,9 @@ class APIBlueprint(ReprAsStr):
         if len(sequence) <= index:
             if action_instead_of_resource:
                 try:
-                    act, _ = Action.parse_from_etree(sequence, 0)
+                    act, _ = Action.parse_from_etree(r, sequence, 0)
                     act._name = r.name
-                    act._request_method = r._request_method
+                    act._request_method = r.request_method
                     act._uri_template = r.uri_template
                     r._actions[act.id] = act
                     if entities.report_warnings:
@@ -290,13 +299,13 @@ class APIBlueprint(ReprAsStr):
                     pass
             return
         while index < len(sequence) and self._is_header(sequence[index]):
-            action, index = Action.parse_from_etree(sequence, index)
+            action, index = Action.parse_from_etree(r, sequence, index)
             if action.uri_template is None:
                 action._uri_template = r.uri_template
             if action.request_method is None:
                 action._request_method = r.request_method
             for rr in chain(action.requests.values(),
-                           action.responses.values()):
+                            action.responses.values()):
                 if rr._reference is None:
                     continue
                 if rr._reference not in self._models:
@@ -316,7 +325,7 @@ class APIBlueprint(ReprAsStr):
                     not self._is_header(sequence[index]):
                 node.append(sequence[index])
                 index += 1
-            attr = DataStructure.parse_from_etree(node)
+            attr = DataStructure.parse_from_etree(self, node)
             self._data_structures[attr.name] = attr
 
     def _apply_attributes_references(self):
@@ -343,17 +352,17 @@ class APIBlueprint(ReprAsStr):
                         a.attributes._reference is not None:
                     ref = a.attributes._reference
                     a._attributes = self._attributes.get(
-                        ref, self._data_structures.get(ref))
+                        ref, Attributes(a, [self._data_structures.get(ref)]))
                     if a.attributes is None and entities.report_warnings:
                         sys.stderr.write("Invalid attributes reference: %s\n"
                                          % ref)
 
     @staticmethod
-    def _parse_section(item, name):
+    def _parse_section(parent, item, name):
         section_name = get_section_name(item.text)
         try:
             return SelfParsingSectionRegistry[section_name].parse_from_etree(
-                item)
+                parent, item)
         except KeyError:
             if entities.report_warnings:
                 sys.stderr.write(
