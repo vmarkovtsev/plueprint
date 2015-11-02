@@ -351,8 +351,13 @@ class APIBlueprint(object):
                 elif a.attributes is not None and \
                         a.attributes._reference is not None:
                     ref = a.attributes._reference
-                    a._attributes = self._attributes.get(
-                        ref, Attributes(a, [self._data_structures.get(ref)]))
+                    aval = self._attributes.get(ref)
+                    if aval is not None:
+                        a._attributes = aval
+                        continue
+                    dsval = self._data_structures.get(ref)
+                    if dsval is not None:
+                        a._attributes = Attributes(a, dsval.value)
                     if a.attributes is None and entities.report_warnings:
                         sys.stderr.write("Invalid attributes reference: %s\n"
                                          % ref)
