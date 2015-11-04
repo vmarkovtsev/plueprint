@@ -117,7 +117,15 @@ class SelfParsingSectionRegistry(type):
         super(SelfParsingSectionRegistry, cls).__init__(what, bases, clsdict)
 
 
-class Section(object):
+class SmartReprMixin(object):
+    def __repr__(self):
+        s = str(self)
+        if s.startswith(type(self).__name__):
+            s = s[len(type(self).__name__):].strip()
+        return "%s %s" % (super(SmartReprMixin, self).__repr__(), s)
+
+
+class Section(SmartReprMixin):
     def __init__(self, parent):
         super(Section, self).__init__()
         self._parent = parent
@@ -135,9 +143,6 @@ class Section(object):
         if value is not None and not isinstance(value, weakref.ProxyType):
             value = weakref.proxy(value)
         self.__parent = value
-
-    def __repr__(self):
-        return str(self)
 
 
 class NamedSection(Section):
@@ -822,7 +827,7 @@ class Relation(Section):
         return self._link_id
 
     def __str__(self):
-        return "Relation: " + self._link_id
+        return "Relation " + self._link_id
 
     @staticmethod
     def parse_from_string(parent, txt):
@@ -1095,7 +1100,7 @@ class ResourceGroup(NamedSection):
         return len(self._resources)
 
     def __str__(self):
-        return "Resource group with %d resources (%d actions)" % (
+        return "ResourceGroup with %d resources (%d actions)" % (
             len(self), sum(len(r) for r in self)
         )
 

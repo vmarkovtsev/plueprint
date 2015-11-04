@@ -41,7 +41,7 @@ from markdown.serializers import ElementTree, to_html_string
 from pytrie import SortedStringTrie as trie
 from .entities import ResourceGroup, Resource, SelfParsingSectionRegistry, \
     Action, DataStructure, Section, get_section_name, parse_description, \
-    Attributes
+    Attributes, SmartReprMixin
 from . import entities
 
 
@@ -49,7 +49,7 @@ class APIBlueprintParseError(Exception):
     pass
 
 
-class APIBlueprint(object):
+class APIBlueprint(SmartReprMixin):
     def __init__(self):
         super(APIBlueprint, self).__init__()
         self._metadata = {}
@@ -72,7 +72,7 @@ class APIBlueprint(object):
 
     @property
     def format(self):
-        return self._metadata["FORMAT"]
+        return self._metadata.get("FORMAT")
 
     @property
     def name(self):
@@ -136,9 +136,6 @@ class APIBlueprint(object):
                "resources, %d actions)" % (
                 self.name, self.format, len(self), self.count_resources(),
                 self.count_actions())
-
-    def __repr__(self):
-        return str(self)
 
     def keys(self):
         return self._groups.keys()
