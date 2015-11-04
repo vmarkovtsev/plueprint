@@ -1,4 +1,4 @@
-from distutils.core import setup
+from setuptools import setup
 import os
 
 
@@ -12,7 +12,7 @@ setup(
     name="plueprint",
     description="API Blueprint (https://apiblueprint.org/) parser in pure "
                 "Python",
-    version="0.2.1",
+    version="0.3.0",
     license="New BSD",
     author="Vadim Markovtsev",
     author_email="gmarkhor@gmail.com",
@@ -22,6 +22,7 @@ setup(
     package_dir={"plueprint": "."},
     keywords=["blueprint", "apiblueprint"],
     install_requires=parse_requirements(),
+    package_data={'': ['requirements.txt', 'LICENSE', 'README.md']},
     classifiers=[
         "Development Status :: 4 - Beta",
         "Environment :: Console",
