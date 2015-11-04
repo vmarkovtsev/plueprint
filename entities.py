@@ -680,7 +680,6 @@ class Model(PredefinedPayloadSection):
 
 
 class RRPredefinedPayloadSection(PredefinedPayloadSection, ReferenceableMixin):
-
     def _copy_from_payload(self, payload):
         if self.name is None:
             self._name = payload.name
@@ -706,6 +705,17 @@ class Request(RRPredefinedPayloadSection):
     SECTION_TYPE = "Request"
     NESTED_SECTION_ID = "requests"
 
+    def __init__(self, parent, name, media_type, description,
+                 headers, attributes, body, schema):
+        super(Request, self).__init__(
+            parent, name, media_type, description, headers, attributes, body,
+            schema)
+        self._responses = []
+
+    @property
+    def responses(self):
+        return {r.http_code: r for r in self._responses}
+
     @property
     def uri(self):
         values = {}
@@ -717,14 +727,39 @@ class Request(RRPredefinedPayloadSection):
                 values[p.name] = p.value
         return self.uri_template.expand(values)
 
+    def _add_response(self, response):
+        assert isinstance(response, Response)
+        self._responses.append(weakref.proxy(response))
+
 
 class Response(RRPredefinedPayloadSection):
     SECTION_TYPE = "Response"
     NESTED_SECTION_ID = "responses"
 
+    def __init__(self, parent, name, media_type, description,
+                 headers, attributes, body, schema):
+        super(Response, self).__init__(
+            parent, name, media_type, description, headers, attributes, body,
+            schema)
+        self._request = None
+
+    @property
+    def request(self):
+        return self._request
+
+    @property
+    def _request(self):
+        return self.__request
+
+    @_request.setter
+    def _request(self, value):
+        if value is not None and not isinstance(value, weakref.ProxyType):
+            value = weakref.proxy(value)
+        self.__request = value
+
     @property
     def http_code(self):
-        return self._name
+        return int(self._name)
 
 
 class ApiSection(NamedSection):
@@ -815,12 +850,12 @@ class Action(ApiSection):
         index = [0]
 
         def iter_r(rs):
-            for r in rs:
-                if not r.name:
-                    yield str(index[0]), r
+            for item in rs:
+                if not item.name:
+                    yield str(index[0]), item
                     index[0] += 1
                 else:
-                    yield r.name, r
+                    yield item.name, item
 
         self._requests = OrderedDict(iter_r(requests))
         index = [0]
@@ -870,6 +905,20 @@ class Action(ApiSection):
         res += middle.strip() + "]"
         return res
 
+    def __iter__(self):
+        if not self.requests:
+            yield Request(self, "default", None, None, None,
+                          self.attributes, None, None), \
+                {r.http_code: r for r in self.responses}
+        else:
+            for request in self.requests:
+                yield request, request.responses
+
+    def __len__(self):
+        if not self.requests:
+            return 1
+        return len(self.requests)
+
     @staticmethod
     def parse_definition(txt):
         txt = txt.strip()
@@ -904,6 +953,7 @@ class Action(ApiSection):
             "requests": [],
             "responses": []
         }
+        current_request = None
         if len(sequence) > index:
             for li in sequence[index]:
                 section_name = get_section_name(li.text)
@@ -920,6 +970,12 @@ class Action(ApiSection):
                             "Failed to parse section \"%s\" in action "
                             "%s: %s\n" % (section_name, adef[0], e))
                 else:
+                    if isinstance(section, Request):
+                        current_request = section
+                    elif isinstance(section, Response):
+                        section._request = current_request
+                        if current_request is not None:
+                            current_request._add_response(section)
                     if section.SECTION_TYPE in ("Request", "Response"):
                         kwargs[section.NESTED_SECTION_ID].append(section)
                     else:
