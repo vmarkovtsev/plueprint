@@ -126,6 +126,8 @@ class SmartReprMixin(object):
 
 
 class Section(SmartReprMixin):
+    NESTED_ATTRS = tuple()
+
     def __init__(self, parent):
         super(Section, self).__init__()
         self._parent = parent
@@ -143,6 +145,21 @@ class Section(SmartReprMixin):
         if value is not None and not isinstance(value, weakref.ProxyType):
             value = weakref.proxy(value)
         self.__parent = value
+
+    def _fix_parents(self, parent):
+        self._parent = parent
+        for attr in self.NESTED_ATTRS:
+            attr = getattr(self, attr)
+            if attr is None:
+                continue
+            if isinstance(attr, Section):
+                attr._fix_parents(self)
+                continue
+            children = getattr(attr, "values", None)
+            children = children() if children is not None else attr
+            for child in children:
+                if isinstance(child, Section):
+                    child._fix_parents(self)
 
 
 class NamedSection(Section):
@@ -163,6 +180,8 @@ class NamedSection(Section):
 def Collection(child_type):
     @add_metaclass(SelfParsingSectionRegistry)
     class Base(Section):
+        NESTED_ATTRS = "_children",
+
         def __init__(self, parent, children):
             super(Base, self).__init__(parent)
             self._children = OrderedDict()
@@ -257,6 +276,13 @@ class Attribute(NamedSection):
                     res += "  %s\n" % line
         return res
 
+    def _fix_parents(self, parent):
+        super(Attribute, self)._fix_parents(parent)
+        if isinstance(self.value, list):
+            for v in self.value:
+                if isinstance(v, Attribute):
+                    v._fix_parents(self)
+
     @classmethod
     def parse_from_string(cls, parent, line):
         if line[0] in ('-', '+'):
@@ -341,6 +367,8 @@ class ParameterMember(NamedSection):
 
 
 class Parameter(Attribute):
+    NESTED_ATTRS = Attribute.NESTED_ATTRS + ("_members",)
+
     def __init__(self, parent, name, type_, required, description, value,
                  default_value, members):
         super(Parameter, self).__init__(
@@ -451,6 +479,7 @@ class Attributes(Collection(Attribute)):
 class Headers(Section):
     NESTED_SECTION_ID = "headers"
     SECTION_TYPE = "Headers"
+    NESTED_ATTRS = "_headers",
 
     def __init__(self, parent, headers):
         super(Headers, self).__init__(parent)
@@ -531,6 +560,8 @@ class Schema(PredefinedAssetSection):
 
 
 class PayloadSection(NamedSection):
+    NESTED_ATTRS = "_headers", "_attributes", "_body", "_schema", "_reference"
+
     def __init__(self, parent, keyword, name, media_type, description,
                  headers, attributes, body, schema, reference=None):
         super(PayloadSection, self).__init__(parent, name, description)
@@ -736,6 +767,13 @@ class Request(RRPredefinedPayloadSection):
         assert isinstance(response, Response)
         self._responses.append(weakref.proxy(response))
 
+    def _fix_parents(self, parent):
+        super(Request, self)._fix_parents(parent)
+        responses = tuple(self._responses)
+        del self._responses[:]
+        for r in responses:
+            self._add_response(self.parent.responses[r.http_code])
+
 
 class Response(RRPredefinedPayloadSection):
     SECTION_TYPE = "Response"
@@ -766,10 +804,16 @@ class Response(RRPredefinedPayloadSection):
     def http_code(self):
         return int(self._name)
 
+    def _fix_parents(self, parent):
+        super(Response, self)._fix_parents(parent)
+        if self.request is not None:
+            self._request = self.parent.requests[self.request.name]
+
 
 class ApiSection(NamedSection):
     NESTED_SECTIONS = "parameters", "attributes"
     URL_PATH_PATH_REGEXP = re.compile("^[\w\-\.]*$]")
+    NESTED_ATTRS = "_parameters", "_attributes"
 
     def __init__(self, parent, name, description, request_method, uri_template,
                  parameters, attributes):
@@ -844,6 +888,8 @@ class Relation(Section):
 
 class Action(ApiSection):
     NESTED_SECTIONS = ApiSection.NESTED_SECTIONS + ("relation",)
+    NESTED_ATTRS = ApiSection.NESTED_ATTRS + \
+        ("_relation", "_requests", "_responses")
 
     def __init__(self, parent, name, request_method, uri_template, description,
                  relation, parameters, attributes, requests, responses):
@@ -854,17 +900,18 @@ class Action(ApiSection):
         self._relation = relation
         index = [0]
 
-        def iter_r(rs):
+        def iter_r(rs, attr):
             for item in rs:
-                if not item.name:
-                    yield str(index[0]), item
+                iid = getattr(item, attr)
+                if not iid:
+                    iid = "#%d" % index[0]
+                    setattr(item, "_" + attr, iid)
                     index[0] += 1
-                else:
-                    yield item.name, item
+                yield iid, item
 
-        self._requests = OrderedDict(iter_r(requests))
+        self._requests = OrderedDict(iter_r(requests, "name"))
         index = [0]
-        self._responses = OrderedDict(iter_r(responses))
+        self._responses = OrderedDict(iter_r(responses, "http_code"))
         for r in chain(requests, responses):
             r._parent = self
 
@@ -914,9 +961,9 @@ class Action(ApiSection):
         if not self.requests:
             yield Request(self, "default", None, None, None,
                           self.attributes, None, None), \
-                {r.http_code: r for r in self.responses}
+                self.responses
         else:
-            for request in self.requests:
+            for request in self.requests.values():
                 yield request, request.responses
 
     def __len__(self):
@@ -998,6 +1045,7 @@ class Action(ApiSection):
 
 class Resource(ApiSection):
     NESTED_SECTIONS = ApiSection.NESTED_SECTIONS + ("model",)
+    NESTED_ATTRS = ApiSection.NESTED_ATTRS + ("_model", "_actions")
 
     def __init__(self, parent, name, request_method, uri_template, description,
                  parameters, attributes, model):
@@ -1085,6 +1133,8 @@ class Resource(ApiSection):
 
 
 class ResourceGroup(NamedSection):
+    NESTED_ATTRS = "_resources",
+
     def __init__(self, parent, name, description):
         super(ResourceGroup, self).__init__(parent, name, description)
         self._resources = OrderedDict()

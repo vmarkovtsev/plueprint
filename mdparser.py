@@ -30,10 +30,11 @@ ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 """
+from collections import OrderedDict, defaultdict
+from copy import deepcopy
 from itertools import chain
 import sys
 
-from collections import OrderedDict, defaultdict
 from markdown.preprocessors import Preprocessor
 from markdown.treeprocessors import Treeprocessor
 from markdown.extensions import Extension
@@ -149,6 +150,37 @@ class APIBlueprint(SmartReprMixin):
     def count_actions(self):
         return sum(sum(len(r) for r in g) for g in self)
 
+    def merge(self, other):
+        if not isinstance(other, APIBlueprint):
+            raise TypeError("Merge with plueprint.mdparser.APIBlueprint "
+                            "objects only")
+        if other.name:
+            self._name += " & " + other.name
+        if other.overview:
+            self._overview += "\n" + other.overview
+        if set(self._data_structures).intersection(other._data_structures):
+            raise ValueError("Data structures collide")
+        self._data_structures.update(deepcopy(other._data_structures))
+        for group in other:
+            mineg = self._groups.get(group.name)
+            if mineg is None:
+                mineg = self._groups[group.name] = deepcopy(group)
+            else:
+                for resource in group:
+                    miner = mineg._resources.get(resource.id)
+                    if miner is None:
+                        mineg._resources[resource.id] = deepcopy(resource)
+                    else:
+                        for action in resource:
+                            minea = miner._actions.get(action.id)
+                            if minea is not None:
+                                raise NotImplementedError(
+                                    "Cannot merge actions: %s" % minea)
+                            miner[action.id] = deepcopy(action)
+            mineg._parent = self
+            mineg._fix_parents(self)
+        self._reset_trie()
+
     @staticmethod
     def parse_from_etree(tree):
         instance = APIBlueprint()
@@ -196,21 +228,24 @@ class APIBlueprint(SmartReprMixin):
                 self._parse_data_structure(sequence)
             else:
                 self._parse_resource(sequence, None)
-            paths = defaultdict(lambda: defaultdict(list))
-            for a in self.actions:
-                cu = a.uri
-                if cu is not None:
-                    path = ""
-                    paths["/"][a.request_method].append(a)
-                    for sub in cu.split('/'):
-                        if sub:
-                            path += "/" + sub
-                            paths[path][a.request_method].append(a)
-            self._trie = trie(paths.items())
+            self._reset_trie()
             self._apply_attributes_references()
         finally:
             del self._attributes
             del self._models
+
+    def _reset_trie(self):
+        paths = defaultdict(lambda: defaultdict(list))
+        for a in self.actions:
+            cu = a.uri
+            if cu is not None:
+                path = ""
+                paths["/"][a.request_method].append(a)
+                for sub in cu.split('/'):
+                    if sub:
+                        path += "/" + sub
+                        paths[path][a.request_method].append(a)
+        self._trie = trie(paths.items())
 
     def _parse_resource_group(self, sequence):
         name = sequence[0].text
