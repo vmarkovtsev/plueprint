@@ -30,9 +30,10 @@ ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 """
-from itertools import chain
+from copy import deepcopy
 
-from collections import OrderedDict
+from itertools import chain
+from collections import OrderedDict, defaultdict
 import json
 from markdown import to_html_string
 import re
@@ -45,6 +46,11 @@ from xml.etree import ElementTree
 
 
 report_warnings = True
+
+try:
+    ustr = unicode
+except NameError:
+    ustr = str
 
 
 def select_pos(*args):
@@ -66,6 +72,14 @@ def get_section_name(txt):
     if sep_pos < 0:
         sep_pos = len(txt)
     return txt[:sep_pos]
+
+
+def get_pre_contents(node):
+    cnt = node.text
+    if node.tag == "pre" and not cnt and len(node) == 1 and \
+            node[0].tag == "code":
+        cnt = node[0].text
+    return cnt
 
 
 def parse_description(sequence, index, *stop_tags):
@@ -98,6 +112,12 @@ def property_with_parent(name, ptype):
         setattr(self, "_" + name, value)
 
     return property(getter, setter)
+
+
+class OrderedDefaultDict(OrderedDict, defaultdict):
+    def __init__(self, factory, *args, **kwargs):
+        super(OrderedDefaultDict, self).__init__(*args, **kwargs)
+        self.default_factory = factory
 
 
 class SelfParsingSectionRegistryDict(type):
@@ -439,7 +459,7 @@ class DataStructure(Attribute, ReferenceableMixin):
     def parse_from_etree(cls, parent, node):
         instance = super(DataStructure, cls).parse_from_etree(parent, node)
         if len(node) == 1 and node[0].tag in ("p", "pre"):
-            reference = cls._extract_reference(node[0].text)
+            reference = cls._extract_reference(get_pre_contents(node[0]))
             if reference is not None:
                 instance._description = None
                 instance._reference = reference
@@ -508,9 +528,10 @@ class Headers(Section):
     def parse_from_etree(parent, node):
         if len(node) == 0 or node[0].tag not in ("p", "pre"):
             raise ValueError("Invalid headers section format")
-        if node[0].text:
-            headers = dict(tuple(map(str.strip, line.split(':')))
-                           for line in node[0].text.split('\n'))
+        text = get_pre_contents(node[0])
+        if text:
+            headers = dict(tuple(map(ustr.strip, line.split(':')))
+                           for line in text.split('\n') if line)
         else:
             headers = None
         return Headers(parent, headers)
@@ -546,7 +567,7 @@ class PredefinedAssetSection(AssetSection):
             raise ValueError("Assets section is empty")
         if node[0].tag not in ("pre", "p"):
             raise ValueError("Invalid format of asset section")
-        return cls(parent, node[0].text)
+        return cls(parent, get_pre_contents(node[0]))
 
 
 class Body(PredefinedAssetSection):
@@ -613,9 +634,11 @@ class PayloadSection(NamedSection):
 
     def value(self):
         if self.media_type == ("application", "json"):
-            return json.loads(self.body)
+            return json.loads(self.body.content)
         elif self.media_type == ("application", "xml"):
-            return ElementTree.fromstring(self.body)
+            return ElementTree.fromstring(self.body.content)
+        elif self.media_type == ("text", "plain"):
+            return self.body.content.strip()
         raise NotImplemented(
             "value() is not implemented for media type %s/%s" %
             self.media_type)
@@ -666,7 +689,7 @@ class PredefinedPayloadSection(PayloadSection):
         }
         if len(node) > index:
             if node[index].tag == "pre":
-                kwargs["body"] = Body(None, node[index].text)
+                kwargs["body"] = Body(None, get_pre_contents(node[index]))
             elif node[index].tag == "ul":
                 for li in node[index]:
                     section_name = get_section_name(li.text)
@@ -733,7 +756,7 @@ class RRPredefinedPayloadSection(PredefinedPayloadSection, ReferenceableMixin):
         if obj.headers is None and obj.attributes is None and \
                 obj.body is None and obj.schema is None and len(node) == 1 \
                 and node[0].tag in ("p", "pre"):
-            obj._reference = cls._extract_reference(node[0].text)
+            obj._reference = cls._extract_reference(get_pre_contents(node[0]))
         return obj
 
 
@@ -898,20 +921,21 @@ class Action(ApiSection):
         if relation is not None:
             assert isinstance(relation, Relation)
         self._relation = relation
-        index = [0]
-
-        def iter_r(rs, attr):
-            for item in rs:
-                iid = getattr(item, attr)
-                if not iid:
-                    iid = "#%d" % index[0]
-                    setattr(item, "_" + attr, iid)
-                    index[0] += 1
-                yield iid, item
-
-        self._requests = OrderedDict(iter_r(requests, "name"))
-        index = [0]
-        self._responses = OrderedDict(iter_r(responses, "http_code"))
+        self._requests = OrderedDict()
+        index = 0
+        for item in requests:
+            name = item.name
+            if not name:
+                name = "#%d" % index
+                item._name = name
+                index += 1
+            self._requests[name] = item
+        self._responses = OrderedDefaultDict(list)
+        for item in responses:
+            code = item.http_code
+            if code is None:
+                code = 200
+            self._responses[code].append(item)
         for r in chain(requests, responses):
             r._parent = self
 
@@ -961,7 +985,7 @@ class Action(ApiSection):
         if not self.requests:
             yield Request(self, "default", None, None, None,
                           self.attributes, None, None), \
-                self.responses
+                list(chain.from_iterable(self.responses.values()))
         else:
             for request in self.requests.values():
                 yield request, request.responses
@@ -1005,7 +1029,8 @@ class Action(ApiSection):
             "requests": [],
             "responses": []
         }
-        current_request = None
+        current_requests = []
+        clear_requests = False
         if len(sequence) > index:
             for li in sequence[index]:
                 section_name = get_section_name(li.text)
@@ -1023,11 +1048,17 @@ class Action(ApiSection):
                             "%s: %s\n" % (section_name, adef[0], e))
                 else:
                     if isinstance(section, Request):
-                        current_request = section
+                        if clear_requests:
+                            del current_requests[:]
+                        current_requests.append(section)
                     elif isinstance(section, Response):
-                        section._request = current_request
-                        if current_request is not None:
-                            current_request._add_response(section)
+                        clear_requests = True
+                        for i, cr in enumerate(current_requests):
+                            section._request = cr
+                            cr._add_response(section)
+                            if i < len(current_requests) - 1:
+                                kwargs["responses"].append(section)
+                                section = deepcopy(section)
                     if section.SECTION_TYPE in ("Request", "Response"):
                         kwargs[section.NESTED_SECTION_ID].append(section)
                     else:

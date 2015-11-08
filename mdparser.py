@@ -337,7 +337,7 @@ class APIBlueprint(SmartReprMixin):
             if action.request_method is None:
                 action._request_method = r.request_method
             for rr in chain(action.requests.values(),
-                            action.responses.values()):
+                            chain.from_iterable(action.responses.values())):
                 if rr._reference is None:
                     continue
                 if rr._reference not in self._models:
