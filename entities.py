@@ -131,9 +131,16 @@ class SelfParsingSectionRegistryDict(type):
 class SelfParsingSectionRegistry(type):
     def __init__(cls, what, bases=None, clsdict=None):
         try:
-            SelfParsingSectionRegistry.registry[clsdict["SECTION_TYPE"]] = cls
+            section_type = clsdict["SECTION_TYPE"]
         except KeyError:
+            # base classes
             pass
+        else:
+            if not isinstance(section_type, (tuple, list, set)):
+                section_type = section_type,
+            for val in section_type:
+                assert val not in SelfParsingSectionRegistry.registry
+                SelfParsingSectionRegistry.registry[val] = cls
         super(SelfParsingSectionRegistry, cls).__init__(what, bases, clsdict)
 
 
@@ -468,12 +475,12 @@ class DataStructure(Attribute, ReferenceableMixin):
 
 class Parameters(Collection(Parameter)):
     NESTED_SECTION_ID = "parameters"
-    SECTION_TYPE = "Parameters"
+    SECTION_TYPE = "Parameters", "Parameter"
 
 
 class Attributes(Collection(Attribute)):
     NESTED_SECTION_ID = "attributes"
-    SECTION_TYPE = "Attributes"
+    SECTION_TYPE = "Attributes", "Attribute"
 
     def __init__(self, parent, children, reference=None):
         if reference is not None:
@@ -498,7 +505,7 @@ class Attributes(Collection(Attribute)):
 @add_metaclass(SelfParsingSectionRegistry)
 class Headers(Section):
     NESTED_SECTION_ID = "headers"
-    SECTION_TYPE = "Headers"
+    SECTION_TYPE = "Headers", "Header"
     NESTED_ATTRS = "_headers",
 
     def __init__(self, parent, headers):
@@ -712,6 +719,12 @@ class PredefinedPayloadSection(PayloadSection):
 
     @staticmethod
     def parse_definition(txt):
+        if "\n" in txt:
+            if report_warnings:
+                sys.stderr.write(
+                    "Invalid format, description was discarded: \"%s\"\n"
+                    % txt)
+            txt = txt[:txt.find("\n")]
         sep_pos = select_pos(txt.find(c) for c in (' ', '\t'))
         if sep_pos < 0:
             return None, None
