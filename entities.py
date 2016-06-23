@@ -33,7 +33,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 from copy import deepcopy
 
 from itertools import chain
-from collections import OrderedDict, defaultdict
+from collections import OrderedDict
 import json
 from markdown import to_html_string
 import re
@@ -114,10 +114,14 @@ def property_with_parent(name, ptype):
     return property(getter, setter)
 
 
-class OrderedDefaultDict(OrderedDict, defaultdict):
+class OrderedDefaultDict(OrderedDict):
     def __init__(self, factory, *args, **kwargs):
         super(OrderedDefaultDict, self).__init__(*args, **kwargs)
         self.default_factory = factory
+
+    def __missing__(self, key):
+        result = self[key] = self.default_factory()
+        return result
 
 
 class SelfParsingSectionRegistryDict(type):
